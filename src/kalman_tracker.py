@@ -1,11 +1,11 @@
-"""Kalman-filter-based predictive tracker for moving optical beacons (Phase 4).
+"""Kalman-filter-based predictive tracker for moving optical beacons.
 
 This module provides:
 - 2D Linear Kalman Filter implementation using OpenCV (cv2.KalmanFilter).
 - Kinematic constant-velocity state model [x, y, vx, vy]^T.
 - Outlier detection and measurement gating (rejects far-away false positives).
 - Finite State Machine with exact states:
-    UNINITIALIZED -> TRACKING -> PREDICTING -> REACQUIRING -> LOST
+    UNINITIALIZED -> TRACKING -> PREDICTING -> SEARCHING -> REACQUIRING -> LOST
 - Tracking confidence scoring and miss counter management.
 - Complete state telemetry for downstream controller integration.
 """
@@ -185,20 +185,18 @@ class KalmanBeaconTracker:
         2. STEP 1: Always call kalman.predict().
         3. STEP 2: If measurement exists, perform gating check against predicted state.
            - If plausible (distance <= threshold):
-               - If recovering from miss/loss -> state = REACQUIRING
+               - If recovering from miss/search/loss -> state = REACQUIRING
                - Else -> state = TRACKING
                - Correct Kalman filter using measurement.
                - Reset miss_count = 0, boost confidence.
            - If outlier (distance > threshold):
                - Reject measurement (DO NOT call correct).
                - Treat as miss: increment miss_count, degrade confidence.
-               - If miss_count > max_prediction_frames -> state = LOST
-               - Else -> state = PREDICTING
+               - Evaluate state transition: PREDICTING -> SEARCHING -> LOST.
         4. If measurement does not exist (loss / occlusion):
            - DO NOT call correct().
            - Increment miss_count, degrade confidence.
-           - If miss_count > max_prediction_frames -> state = LOST
-           - Else -> state = PREDICTING
+           - Evaluate state transition: PREDICTING -> SEARCHING -> LOST.
         
         Args:
             measurement: BeaconMeasurement object OR raw (x, y) tuple / None.
@@ -250,7 +248,7 @@ class KalmanBeaconTracker:
             if plausible:
                 # Plausible measurement -> Accepted!
                 self.last_measurement_accepted = True
-                is_recovering = (self.miss_count > 0) or (self.state in (TrackingState.PREDICTING, TrackingState.LOST))
+                is_recovering = (self.miss_count > 0) or (self.state in (TrackingState.PREDICTING, TrackingState.SEARCHING, TrackingState.LOST))
                 
                 # Correct Kalman filter
                 self.update(meas_pos, timestamp)
@@ -283,12 +281,8 @@ class KalmanBeaconTracker:
                     self.confidence - self.state_cfg.confidence_decay_rate
                 )
 
-                # State transition based on miss count limit
-                if self.miss_count > self.state_cfg.max_prediction_frames:
-                    self.state = TrackingState.LOST
-                else:
-                    self.state = TrackingState.PREDICTING
-
+                # State transitions: PREDICTING -> SEARCHING -> LOST
+                self._update_miss_state()
                 return self.get_current_result(timestamp, is_predicted=True)
 
         else:
@@ -303,13 +297,18 @@ class KalmanBeaconTracker:
                 self.confidence - self.state_cfg.confidence_decay_rate
             )
 
-            # State transition based on miss count limit
-            if self.miss_count > self.state_cfg.max_prediction_frames:
-                self.state = TrackingState.LOST
-            else:
-                self.state = TrackingState.PREDICTING
-
+            # State transitions: PREDICTING -> SEARCHING -> LOST
+            self._update_miss_state()
             return self.get_current_result(timestamp, is_predicted=True)
+
+    def _update_miss_state(self) -> None:
+        """Update FSM state based on consecutive miss count thresholds."""
+        if self.miss_count > self.state_cfg.max_prediction_frames:
+            self.state = TrackingState.LOST
+        elif self.miss_count >= getattr(self.state_cfg, "search_start_frames", 15):
+            self.state = TrackingState.SEARCHING
+        else:
+            self.state = TrackingState.PREDICTING
 
     def get_current_position(self) -> Tuple[float, float]:
         """Retrieve current estimated (x, y) beacon position.

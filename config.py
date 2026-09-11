@@ -2,9 +2,10 @@
 
 This module defines all tunable parameters for:
 - Beacon Motion Simulation (initial coordinates, velocity, boundary margins, random seed)
-- Disturbance & Occlusion Simulation (noise std, jitter std, occlusion intervals, outliers)
+- Disturbance & Occlusion Simulation (noise std, jitter std, occlusion intervals, outliers, FOV dependency)
 - Virtual Camera Model (center/pan/tilt, FOV width/height, arena boundaries)
 - Camera Pan/Tilt Controller (speeds, proportional gains, deadband, predictive servoing)
+- Local Search Scanner (search start threshold, search radius, step size, hold duration)
 - Tracking State Machine & Gating (gating threshold, max prediction frames, confidence dynamics)
 - Kalman Filter (process & measurement noise, covariance matrices)
 - Visualizer & Demonstration settings (window size, frame rates, color schemes)
@@ -36,15 +37,16 @@ class DisturbanceConfig:
     enable_jitter: bool = True
     jitter_std: float = 1.0                            # High-frequency camera jitter noise (pixels)
     enable_occlusions: bool = True
-    # Demonstrates Scenario B (short loss: 60..85) and Scenario C (long loss: 160..220)
+    # Demonstrates Scenario B (short loss: 60..80), Scenario C (extended loss: 150..220 triggering local search)
     occlusion_intervals: List[Tuple[int, int]] = field(
-        default_factory=lambda: [(60, 85), (160, 220)]
+        default_factory=lambda: [(60, 80), (150, 220)]
     )
     # Demonstrates Scenario D (far-away false detection spikes / outliers)
     enable_outliers: bool = True
     outlier_events: List[Tuple[int, Tuple[float, float]]] = field(
-        default_factory=lambda: [(280, (1100.0, 100.0)), (281, (1100.0, 100.0))]
+        default_factory=lambda: [(290, (1100.0, 100.0)), (291, (1100.0, 100.0))]
     )
+    require_fov_for_detection: bool = False            # When True, beacon must be within VirtualCamera FOV to be detected
     default_confidence: float = 0.95                   # Confidence assigned to valid detections
     random_seed: Optional[int] = 101                   # seed for reproducible disturbance / noise generation
 
@@ -76,6 +78,16 @@ class CameraControllerConfig:
 
 
 @dataclass
+class LocalSearchConfig:
+    """Bounded local search pattern and scanning parameters."""
+    search_start_frames: int = 15                      # Consecutive miss frames before triggering local search (PREDICTING -> SEARCHING)
+    search_radius_px: float = 140.0                    # Bounded search radius around Kalman prediction (pixels)
+    step_size_px: float = 45.0                         # Distance step between scan waypoints (pixels)
+    hold_frames_per_step: int = 4                      # Number of frames to hold each search waypoint
+    max_prediction_frames: int = 55                    # Total miss limit before declaring track LOST
+
+
+@dataclass
 class KalmanConfig:
     """Kalman filter tuning parameters."""
     dt: float = 1.0 / 30.0                             # Nominal time step (30 FPS)
@@ -90,8 +102,9 @@ class KalmanConfig:
 class TrackingStateConfig:
     """State machine, confidence dynamics, and outlier rejection gating parameters."""
     gating_threshold_px: float = 85.0                  # Max distance between prediction and measurement to accept (pixels)
-    max_prediction_frames: int = 35                    # Max consecutive frames in PREDICTING before transitioning to LOST
-    confidence_decay_rate: float = 0.025               # Per-frame confidence decay during missing/rejected detections
+    search_start_frames: int = 15                      # Miss frames to transition from PREDICTING to SEARCHING
+    max_prediction_frames: int = 55                    # Max consecutive frames in (PREDICTING + SEARCHING) before LOST
+    confidence_decay_rate: float = 0.02                # Per-frame confidence decay during missing/rejected detections
     confidence_recovery_rate: float = 0.15             # Confidence recovery boost per accepted valid measurement
     min_confidence: float = 0.05                       # Minimum floor for tracking confidence
     max_confidence: float = 1.0                        # Maximum ceiling for tracking confidence
@@ -100,7 +113,7 @@ class TrackingStateConfig:
 @dataclass
 class VisualizerConfig:
     """Visualization window and overlay styling."""
-    window_name: str = "SIH Part 2 - Predictive Tracking & Pan/Tilt Camera Control"
+    window_name: str = "SIH Part 2 - Predictive Tracking & Local Search"
     canvas_width: int = 1280
     canvas_height: int = 720
     fps: int = 30
@@ -108,6 +121,7 @@ class VisualizerConfig:
     show_ground_truth: bool = True
     show_measurements: bool = True
     show_camera_fov: bool = True                       # Display virtual camera FOV rectangle and crosshair
+    show_local_search: bool = True                     # Display local search radius and current search target
 
 
 @dataclass
@@ -117,6 +131,7 @@ class SystemConfig:
     disturbance: DisturbanceConfig = field(default_factory=DisturbanceConfig)
     camera: VirtualCameraConfig = field(default_factory=VirtualCameraConfig)
     controller: CameraControllerConfig = field(default_factory=CameraControllerConfig)
+    search: LocalSearchConfig = field(default_factory=LocalSearchConfig)
     kalman: KalmanConfig = field(default_factory=KalmanConfig)
     tracking: TrackingStateConfig = field(default_factory=TrackingStateConfig)
     visualizer: VisualizerConfig = field(default_factory=VisualizerConfig)

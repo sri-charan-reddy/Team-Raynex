@@ -6,9 +6,10 @@ This module provides:
   2. Actual optical measurements (YELLOW), including rejected outlier markers
   3. Kalman predicted / corrected tracking trajectory (BLUE)
   4. Virtual Camera Field of View (FOV) rectangle and optical axis crosshair
-- Visual cues for state machine transitions (TRACKING, PREDICTING, REACQUIRING, LOST).
+  5. Local Search bounding radius circle, pattern waypoints, and scan target (CYAN/ORANGE)
+- Visual cues for state machine transitions (TRACKING, PREDICTING, SEARCHING, REACQUIRING, LOST).
 - Real-time telemetry Heads-Up Display (HUD) indicating Frame, Detection, State,
-  Confidence, Miss Count, Measurement Acceptance, Virtual Camera FOV, and Pan/Tilt Controller state.
+  Confidence, Miss Count, Measurement Acceptance, Camera FOV, and Local Search status.
 """
 
 from typing import List, Optional, Tuple
@@ -19,6 +20,7 @@ from config import VisualizerConfig
 from src.tracking_state import BeaconMeasurement, TrackingResult, TrackingState
 from src.virtual_camera import VirtualCamera, CameraTelemetry
 from src.camera_controller import CameraController, ControllerMode
+from src.local_search import LocalSearch, LocalSearchTelemetry
 
 
 class TrackingVisualizer:
@@ -45,6 +47,7 @@ class TrackingVisualizer:
         self.COLOR_KALMAN = (255, 175, 40)       # BLUE / CYAN for Kalman track (BGR: 255, 175, 40)
         self.COLOR_KALMAN_TRAIL = (180, 110, 20) # Dimmer blue trail
         self.COLOR_CAMERA_FOV = (140, 130, 80)   # Subtle slate-blue for camera FOV rectangle
+        self.COLOR_SEARCH = (0, 215, 255)        # Vivid gold/cyan for local search
         self.COLOR_TEXT_PRIMARY = (240, 240, 240)
         self.COLOR_TEXT_MUTED = (160, 160, 160)
         
@@ -53,6 +56,7 @@ class TrackingVisualizer:
             TrackingState.UNINITIALIZED: (140, 140, 140),  # Gray
             TrackingState.TRACKING: (50, 220, 50),         # Bright Green
             TrackingState.PREDICTING: (0, 165, 255),       # Orange
+            TrackingState.SEARCHING: (0, 215, 255),        # Bright Gold / Yellow
             TrackingState.REACQUIRING: (255, 220, 0),      # Cyan / Gold
             TrackingState.LOST: (50, 50, 235)              # Bright Red
         }
@@ -65,9 +69,10 @@ class TrackingVisualizer:
         frame_idx: int,
         fps_display: float = 30.0,
         camera: Optional[VirtualCamera] = None,
-        controller: Optional[CameraController] = None
+        controller: Optional[CameraController] = None,
+        search: Optional[LocalSearch] = None
     ) -> np.ndarray:
-        """Render a single visualization frame combining GT, Measurement, Kalman track, Camera FOV, and HUD.
+        """Render a single visualization frame combining GT, Measurement, Kalman track, Camera FOV, Search, and HUD.
         
         Args:
             ground_truth: True (x, y) beacon position.
@@ -77,6 +82,7 @@ class TrackingVisualizer:
             fps_display: Live measured FPS.
             camera: Optional VirtualCamera instance to render FOV bounds.
             controller: Optional CameraController instance to render pan/tilt telemetry.
+            search: Optional LocalSearch instance to render local search bounds and target.
             
         Returns:
             np.ndarray: BGR image canvas suitable for cv2.imshow.
@@ -93,7 +99,11 @@ class TrackingVisualizer:
         if camera is not None and getattr(self.config, "show_camera_fov", True):
             self._draw_camera_fov(canvas, camera, tracking_result)
 
-        # 3. Update trajectory histories
+        # 3. Draw Local Search Region & Waypoints if searching
+        if search is not None and getattr(self.config, "show_local_search", True):
+            self._draw_local_search(canvas, search, tracking_result)
+
+        # 4. Update trajectory histories
         self.ground_truth_history.append(ground_truth)
         if len(self.ground_truth_history) > self.config.trail_length:
             self.ground_truth_history.pop(0)
@@ -108,30 +118,30 @@ class TrackingVisualizer:
         if len(self.kalman_history) > self.config.trail_length:
             self.kalman_history.pop(0)
 
-        # 4. Draw Ground Truth Trajectory Trail (GREEN)
+        # 5. Draw Ground Truth Trajectory Trail (GREEN)
         if self.config.show_ground_truth and len(self.ground_truth_history) >= 2:
             pts = np.array(self.ground_truth_history, dtype=np.int32).reshape((-1, 1, 2))
             cv2.polylines(canvas, [pts], isClosed=False, color=self.COLOR_GT_TRAIL, thickness=2, lineType=cv2.LINE_AA)
 
-        # 5. Draw Measurement History Dots (YELLOW)
+        # 6. Draw Measurement History Dots (YELLOW)
         if self.config.show_measurements:
             for pt in self.measurement_history:
                 if pt is not None:
                     cv2.circle(canvas, (int(pt[0]), int(pt[1])), 2, self.COLOR_MEAS_TRAIL, -1, lineType=cv2.LINE_AA)
 
-        # 6. Draw Kalman Track Trajectory Trail (BLUE)
+        # 7. Draw Kalman Track Trajectory Trail (BLUE)
         if len(self.kalman_history) >= 2:
             k_pts = np.array(self.kalman_history, dtype=np.int32).reshape((-1, 1, 2))
             cv2.polylines(canvas, [k_pts], isClosed=False, color=self.COLOR_KALMAN_TRAIL, thickness=2, lineType=cv2.LINE_AA)
 
-        # 7. Draw Ground Truth Beacon Position (GREEN circle)
+        # 8. Draw Ground Truth Beacon Position (GREEN circle)
         if self.config.show_ground_truth:
             gt_x, gt_y = int(ground_truth[0]), int(ground_truth[1])
             cv2.circle(canvas, (gt_x, gt_y), 9, self.COLOR_GT, 2, lineType=cv2.LINE_AA)
             cv2.circle(canvas, (gt_x, gt_y), 3, self.COLOR_GT, -1, lineType=cv2.LINE_AA)
             cv2.putText(canvas, "GT", (gt_x + 12, gt_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, self.COLOR_GT, 1, cv2.LINE_AA)
 
-        # 8. Draw Optical Measurement (YELLOW or RED if outlier)
+        # 9. Draw Optical Measurement (YELLOW or RED if outlier)
         if measurement.detected and measurement.position is not None:
             m_x, m_y = int(measurement.position[0]), int(measurement.position[1])
             if tracking_result.measurement_accepted:
@@ -145,7 +155,7 @@ class TrackingVisualizer:
                 cv2.drawMarker(canvas, (m_x, m_y), (0, 0, 255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=16, thickness=2, line_type=cv2.LINE_AA)
                 cv2.putText(canvas, "OUTLIER (REJECTED)", (m_x + 22, m_y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 80, 255), 2, cv2.LINE_AA)
 
-        # 9. Draw Kalman Track Position (BLUE circle / target with state-specific label)
+        # 10. Draw Kalman Track Position (BLUE circle / target with state-specific label)
         if tracking_result.state != TrackingState.UNINITIALIZED:
             k_x, k_y = int(kalman_pos[0]), int(kalman_pos[1])
             state_col = self.STATE_COLORS.get(tracking_result.state, self.COLOR_KALMAN)
@@ -155,10 +165,34 @@ class TrackingVisualizer:
             mode_lbl = f"KALMAN ({tracking_result.state.name})"
             cv2.putText(canvas, mode_lbl, (k_x + 18, k_y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, state_col, 1, cv2.LINE_AA)
 
-        # 10. Draw Telemetry HUD
-        self._draw_hud(canvas, ground_truth, measurement, tracking_result, frame_idx, fps_display, camera, controller)
+        # 11. Draw Telemetry HUD
+        self._draw_hud(canvas, ground_truth, measurement, tracking_result, frame_idx, fps_display, camera, controller, search)
 
         return canvas
+
+    def _draw_local_search(
+        self,
+        canvas: np.ndarray,
+        search: LocalSearch,
+        tracking_result: TrackingResult
+    ) -> None:
+        """Render bounded search radius circle, search target waypoint, and scan vectors."""
+        if tracking_result.state != TrackingState.SEARCHING and not search.is_active:
+            return
+
+        cx, cy = int(search.search_center[0]), int(search.search_center[1])
+        radius = int(search.config.search_radius_px)
+        
+        # 1. Bounded search radius circle around Kalman prediction
+        cv2.circle(canvas, (cx, cy), radius, (60, 140, 180), 1, lineType=cv2.LINE_AA)
+        
+        # 2. Draw search target waypoint and scan line
+        tx, ty = int(search.search_target[0]), int(search.search_target[1])
+        cv2.line(canvas, (cx, cy), (tx, ty), (0, 180, 230), 1, lineType=cv2.LINE_AA)
+        cv2.drawMarker(canvas, (tx, ty), (0, 220, 255), markerType=cv2.MARKER_DIAMOND, markerSize=12, thickness=2, line_type=cv2.LINE_AA)
+        
+        wp_str = f"SEARCH WP #{search.step_index + 1}"
+        cv2.putText(canvas, wp_str, (tx + 10, ty + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 255), 1, cv2.LINE_AA)
 
     def _draw_camera_fov(
         self,
@@ -182,7 +216,7 @@ class TrackingVisualizer:
         cv2.line(canvas, (x1, y1), (x1, y1 + b_len), col, 2)
         # Top-right
         cv2.line(canvas, (x2, y1), (x2 - b_len, y1), col, 2)
-        cv2.line(canvas, (x2, y1), (x2, y1 + b_len), col, 2)
+        cv2.line(canvas, (x2, y1), (x2 - b_len, y1), col, 2)
         # Bottom-left
         cv2.line(canvas, (x1, y2), (x1 + b_len, y2), col, 2)
         cv2.line(canvas, (x1, y2), (x1, y2 - b_len), col, 2)
@@ -194,8 +228,8 @@ class TrackingVisualizer:
         cx, cy = int(camera.center[0]), int(camera.center[1])
         cv2.drawMarker(canvas, (cx, cy), self.COLOR_CAMERA_FOV, markerType=cv2.MARKER_CROSS, markerSize=14, thickness=1, line_type=cv2.LINE_AA)
         
-        # Draw dotted / thin line from camera center to Kalman track to show servo error
-        if tracking_result is not None and tracking_result.state in (TrackingState.TRACKING, TrackingState.PREDICTING, TrackingState.REACQUIRING):
+        # Draw line from camera center to Kalman track to show servo error
+        if tracking_result is not None and tracking_result.state in (TrackingState.TRACKING, TrackingState.PREDICTING, TrackingState.SEARCHING, TrackingState.REACQUIRING):
             kx, ky = int(tracking_result.position[0]), int(tracking_result.position[1])
             cv2.line(canvas, (cx, cy), (kx, ky), (80, 100, 140), 1, lineType=cv2.LINE_AA)
 
@@ -220,11 +254,12 @@ class TrackingVisualizer:
         frame_idx: int,
         fps: float,
         camera: Optional[VirtualCamera] = None,
-        controller: Optional[CameraController] = None
+        controller: Optional[CameraController] = None,
+        search: Optional[LocalSearch] = None
     ) -> None:
         """Render top-left telemetry HUD card and status alert banners."""
-        card_w = 490
-        card_h = 350 if camera is not None else 275
+        card_w = 500
+        card_h = 370 if (camera is not None and search is not None) else 320
         sub_img = canvas[15:15 + card_h, 15:15 + card_w]
         white_rect = np.zeros(sub_img.shape, dtype=np.uint8)
         res = cv2.addWeighted(sub_img, 0.35, white_rect, 0.65, 1.0)
@@ -232,7 +267,7 @@ class TrackingVisualizer:
         cv2.rectangle(canvas, (15, 15), (15 + card_w, 15 + card_h), (60, 68, 80), 1)
 
         # Header
-        cv2.putText(canvas, "SIH PART 2 - TRACKING & CAMERA CONTROLLER", (26, 38),
+        cv2.putText(canvas, "SIH PART 2 - TRACKING & LOCAL SEARCH", (26, 38),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, (100, 200, 255), 1, cv2.LINE_AA)
         cv2.line(canvas, (26, 46), (26 + card_w - 24, 46), (60, 68, 80), 1)
 
@@ -300,7 +335,7 @@ class TrackingVisualizer:
         
         # Draw confidence bar
         bar_x = 240
-        bar_w = 210
+        bar_w = 220
         bar_h = 10
         cv2.rectangle(canvas, (bar_x, line_y - 10), (bar_x + bar_w, line_y), (50, 54, 62), -1)
         fill_w = int(bar_w * max(0.0, min(1.0, tracking_result.confidence)))
@@ -325,7 +360,7 @@ class TrackingVisualizer:
         cv2.putText(canvas, acc_str, (26, line_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, acc_col, 1, cv2.LINE_AA)
 
-        # 10. Virtual Camera & Controller Telemetry (if camera provided)
+        # 10. Virtual Camera Telemetry
         if camera is not None:
             line_y += spacing
             in_fov = camera.is_in_fov(ground_truth)
@@ -335,13 +370,18 @@ class TrackingVisualizer:
             cv2.putText(canvas, cam_str, (26, line_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.44, fov_color, 1, cv2.LINE_AA)
 
-            if controller is not None:
-                line_y += spacing
-                ctrl_telem = controller.get_telemetry()
-                ctrl_col = (50, 220, 50) if ctrl_telem.mode == ControllerMode.TRACKING_SERVO else ((0, 165, 255) if ctrl_telem.mode == ControllerMode.PREDICTIVE_SERVO else (180, 170, 110))
-                ctrl_str = f"Pan/Tilt Servo: {ctrl_telem.mode.name} | Err: ({ctrl_telem.error_x:+.1f}, {ctrl_telem.error_y:+.1f}) px"
-                cv2.putText(canvas, ctrl_str, (26, line_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.43, ctrl_col, 1, cv2.LINE_AA)
+        # 11. Local Search & Controller Telemetry
+        if search is not None:
+            line_y += spacing
+            if tracking_result.state == TrackingState.SEARCHING:
+                s_status = f"SCANNING (WP #{search.step_index+1}/{len(search.pattern_offsets)})"
+                s_col = (0, 215, 255)
+            else:
+                s_status = "STANDBY"
+                s_col = self.COLOR_TEXT_MUTED
+            s_str = f"Local Search: {s_status}  |  Radius: {int(search.config.search_radius_px)} px"
+            cv2.putText(canvas, s_str, (26, line_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.43, s_col, 1, cv2.LINE_AA)
 
         # Top Center Alert Banners
         if measurement.detected and not tracking_result.measurement_accepted:
@@ -352,14 +392,21 @@ class TrackingVisualizer:
             cv2.putText(canvas, banner_text, (b_x, 42),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
         elif tracking_result.state == TrackingState.LOST:
-            banner_text = f"--- TRACKING LOST: PREDICTION LIMIT EXCEEDED (> {self.config.fps} frames) ---"
+            banner_text = f"--- TRACKING LOST: SEARCH & PREDICTION LIMIT EXCEEDED ---"
             text_size = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)[0]
             b_x = (self.config.canvas_width - text_size[0]) // 2
             cv2.rectangle(canvas, (b_x - 14, 18), (b_x + text_size[0] + 14, 52), (0, 0, 180), -1)
             cv2.putText(canvas, banner_text, (b_x, 42),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
+        elif tracking_result.state == TrackingState.SEARCHING:
+            banner_text = f"--- LOCAL SEARCH ACTIVE: SCANNING REGION AROUND KALMAN PREDICTION ---"
+            text_size = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 2)[0]
+            b_x = (self.config.canvas_width - text_size[0]) // 2
+            cv2.rectangle(canvas, (b_x - 14, 18), (b_x + text_size[0] + 14, 52), (0, 140, 200), -1)
+            cv2.putText(canvas, banner_text, (b_x, 42),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2, cv2.LINE_AA)
         elif tracking_result.state == TrackingState.PREDICTING:
-            banner_text = f"--- OCCLUSION: KALMAN PREDICTIVE PAN/TILT SERVOING (Miss {tracking_result.miss_count}) ---"
+            banner_text = f"--- OCCLUSION: KALMAN PREDICTIVE SERVOING (Miss {tracking_result.miss_count}) ---"
             text_size = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 2)[0]
             b_x = (self.config.canvas_width - text_size[0]) // 2
             cv2.rectangle(canvas, (b_x - 14, 18), (b_x + text_size[0] + 14, 52), (0, 100, 200), -1)

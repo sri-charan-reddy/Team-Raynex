@@ -6,6 +6,7 @@ from src.beacon_simulator import BeaconSimulator
 from src.disturbance_simulator import DisturbanceSimulator
 from src.virtual_camera import VirtualCamera, CameraTelemetry
 from src.camera_controller import CameraController, ControllerMode, ControllerTelemetry
+from src.local_search import LocalSearch, LocalSearchTelemetry
 from src.visualizer import TrackingVisualizer
 
 __all__ = [
@@ -20,5 +21,7 @@ __all__ = [
     "CameraController",
     "ControllerMode",
     "ControllerTelemetry",
+    "LocalSearch",
+    "LocalSearchTelemetry",
     "TrackingVisualizer",
 ]

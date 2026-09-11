@@ -2,7 +2,7 @@
 
 This module defines:
 - TrackingState: Finite State Machine (FSM) states:
-    UNINITIALIZED, TRACKING, PREDICTING, REACQUIRING, LOST
+    UNINITIALIZED, TRACKING, PREDICTING, SEARCHING, REACQUIRING, LOST
 - BeaconMeasurement: Standard input container representing optical detection data from Part 1
 - TrackingResult: Standard output container provided to downstream controllers (Part 4)
 """
@@ -17,8 +17,9 @@ class TrackingState(Enum):
     """Operational states of the predictive tracking finite state machine."""
     UNINITIALIZED = auto()  # No valid initial detection; awaiting initial lock
     TRACKING = auto()       # Valid measurement received; Kalman predict + correct
-    PREDICTING = auto()     # Measurement missing or rejected; Kalman predict only (dead reckoning)
-    REACQUIRING = auto()    # Measurement returned after missed frames; passed gating check
+    PREDICTING = auto()     # Short temporary miss; Kalman predict only (dead reckoning)
+    SEARCHING = auto()      # Extended miss; local search scanning around Kalman predicted position
+    REACQUIRING = auto()    # Measurement returned after miss/search; passed gating check
     LOST = auto()           # Detection lost longer than max_prediction_frames limit
 
 

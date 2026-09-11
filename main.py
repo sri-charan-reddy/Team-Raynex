@@ -5,19 +5,21 @@ This script coordinates:
 2. Optical disturbance, measurement noise, occlusions, and outlier injection (DisturbanceSimulator).
 3. Virtual Camera Model (VirtualCamera).
 4. Kalman-filter-based predictive tracking and recovery state machine (KalmanBeaconTracker).
-5. Closed-loop Camera Pan/Tilt Movement Controller (CameraController).
-6. Real-time OpenCV visualization displaying:
+5. Bounded Local Search around Kalman prediction (LocalSearch).
+6. Closed-loop Camera Pan/Tilt Movement Controller (CameraController).
+7. Real-time OpenCV visualization displaying:
    - GREEN: Ground Truth (GT)
    - YELLOW: Optical Measurements (MEAS)
    - RED MARKER: Rejected Outlier Measurements
    - BLUE: Kalman Predicted / Corrected Track
    - SLATE RECTANGLE: Moving Virtual Camera Field of View (FOV)
-   - Comprehensive HUD telemetry (State, Confidence, Miss Count, Pan/Tilt Servo Status).
+   - CYAN/GOLD CIRCLE & WAYPOINTS: Bounded Local Search Scan Pattern
+   - Comprehensive HUD telemetry (State, Confidence, Miss Count, Local Search & Pan/Tilt Status).
 
 Demonstration Scenarios Covered:
 - Scenario A: Initial Pan/Tilt Acquisition & Tracking (camera slews from center (640,360) to beacon (900,450))
 - Scenario B: Short detection loss (PREDICTING -> Camera continues predictive pan/tilt servoing)
-- Scenario C: Long detection loss (PREDICTING -> LOST -> Camera holds position)
+- Scenario C: Extended detection loss (PREDICTING -> SEARCHING: Local search scans bounded region around Kalman prediction -> REACQUIRING / LOST)
 - Scenario D: False/far detection rejection (OUTLIER REJECTED, Camera does not jump)
 
 Usage:
@@ -33,35 +35,38 @@ from src.beacon_simulator import BeaconSimulator
 from src.disturbance_simulator import DisturbanceSimulator
 from src.virtual_camera import VirtualCamera
 from src.camera_controller import CameraController
+from src.local_search import LocalSearch
 from src.kalman_tracker import KalmanBeaconTracker
+from src.tracking_state import TrackingState
 from src.visualizer import TrackingVisualizer
 
 
 def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
-    """Run the live predictive tracking and closed-loop camera control demonstration loop.
+    """Run the live predictive tracking, local search, and camera control demonstration loop.
     
     Args:
         config: System configuration settings.
     """
     print("=" * 78)
-    print("SIH Part 2: Predictive Tracking & Virtual Camera Pan/Tilt Control")
+    print("SIH Part 2: Predictive Tracking, Local Search & Camera Control")
     print("=" * 78)
     print("Scenarios Scheduled:")
     print("  - Frames   0.. 59: Pan/Tilt Slew & Acquisition [TRACKING_SERVO]")
-    print("  - Frames  60.. 85: Short occlusion [PREDICTIVE_SERVO -> REACQUIRING]")
-    print("  - Frames 160..220: Long occlusion [PREDICTING -> LOST -> HOLDING]")
-    print("  - Frames 280..281: Far outlier at (1100, 100) [REJECTED, Camera Stable]")
+    print("  - Frames  60.. 80: Short occlusion [PREDICTIVE_SERVO -> REACQUIRING]")
+    print("  - Frames 150..220: Extended occlusion [PREDICTING -> SEARCHING (Local Search) -> LOST/REACQ]")
+    print("  - Frames 290..291: Far outlier at (1100, 100) [REJECTED, Camera Stable]")
     print("-" * 78)
     print("Interactive Controls:")
     print("  [SPACE]  - Pause / Resume simulation")
     print("  [F]      - Inject a 60-frame (~2 sec) false outlier at (1100, 100)")
-    print("  [R]      - Reset simulation, camera, controller, and tracker to initial state")
+    print("  [R]      - Reset simulation, camera, search, and tracker to initial state")
     print("  [Q/ESC]  - Quit demonstration")
     print("=" * 78)
     
     beacon_sim = BeaconSimulator(config.beacon)
     disturbance_sim = DisturbanceSimulator(config.disturbance)
     camera = VirtualCamera(config.camera)
+    local_search = LocalSearch(config.search)
     camera_controller = CameraController(camera, config.controller)
     tracker = KalmanBeaconTracker(config.kalman, config.tracking)
     visualizer = TrackingVisualizer(config.visualizer)
@@ -90,16 +95,24 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 # 2. Disturbance simulation (noise, scheduled occlusions, scheduled/manual outliers)
                 measurement = disturbance_sim.apply_disturbances(ground_truth_pos, timestamp, frame_idx)
                 
-                # 3. Kalman Filter with Outlier Rejection & Recovery State Machine
-                # The tracker ONLY receives the optical measurement.
-                # Ground truth is never accessed by the tracker.
+                # 3. Kalman Filter with Outlier Rejection & State Machine (PREDICTING -> SEARCHING -> LOST)
+                # Tracker receives strictly optical detection data; ground truth is completely hidden.
                 tracking_result = tracker.process_frame(measurement, timestamp)
                 
-                # 4. Closed-loop Pan/Tilt Camera Controller Step
-                # Controller uses ONLY the Kalman tracked / predicted state, never ground truth!
-                camera_controller.update(tracking_result, dt)
+                # 4. Local Search Waypoint Generation
+                # Operates around the CURRENT KALMAN PREDICTED POSITION (never ground truth)
+                is_searching = (tracking_result.state == TrackingState.SEARCHING)
+                search_target = local_search.update(tracking_result.position, is_searching)
                 
-                # 5. Render visual frame (combining GT, Measurement, Kalman Track, Camera FOV, and HUD)
+                # 5. Closed-loop Pan/Tilt Camera Controller Step
+                # Steers camera toward search target during SEARCHING, or Kalman track during TRACKING/PREDICTING
+                camera_controller.update(
+                    tracking_result,
+                    dt,
+                    target_override=search_target if is_searching else None
+                )
+                
+                # 6. Render visual frame
                 canvas = visualizer.render_frame(
                     ground_truth=ground_truth_pos,
                     measurement=measurement,
@@ -107,7 +120,8 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     frame_idx=frame_idx,
                     fps_display=actual_fps,
                     camera=camera,
-                    controller=camera_controller
+                    controller=camera_controller,
+                    search=local_search
                 )
                 
                 cv2.imshow(window_name, canvas)
@@ -126,6 +140,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     beacon_sim.reset()
                     disturbance_sim.reset()
                     camera.reset()
+                    local_search.reset()
                     camera_controller.reset()
                     tracker.reset()
                     visualizer.reset()
@@ -157,6 +172,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 beacon_sim.reset()
                 disturbance_sim.reset()
                 camera.reset()
+                local_search.reset()
                 camera_controller.reset()
                 tracker.reset()
                 visualizer.reset()

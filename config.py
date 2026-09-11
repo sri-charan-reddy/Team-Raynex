@@ -64,7 +64,7 @@ class TrackingStateConfig:
 @dataclass
 class VisualizerConfig:
     """Visualization window and overlay styling."""
-    window_name: str = "SIH Part 2 - Beacon Motion & Disturbance Simulation (Phase 2)"
+    window_name: str = "SIH Part 2 - Kalman Predictive Tracking (Phase 3)"
     canvas_width: int = 1280
     canvas_height: int = 720
     fps: int = 30

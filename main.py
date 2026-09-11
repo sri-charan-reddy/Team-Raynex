@@ -1,10 +1,13 @@
-"""Main entry point and standalone demonstration script for Part 2 (Phase 2).
+"""Main entry point and standalone demonstration script for Part 2 (Phase 3).
 
 This script coordinates:
 1. Beacon ground-truth motion simulation (BeaconSimulator).
 2. Optical disturbance, measurement noise, and occlusion generation (DisturbanceSimulator).
-3. Real-time OpenCV visualization displaying moving ground-truth, noisy optical measurements,
-   and visual detection-loss states.
+3. Kalman-filter-based predictive tracking and state estimation (KalmanBeaconTracker).
+4. Real-time OpenCV visualization displaying:
+   - GREEN: Ground Truth
+   - YELLOW: Optical Measurements
+   - BLUE: Kalman Predicted / Corrected Track
 
 Usage:
     python main.py
@@ -17,26 +20,33 @@ import cv2
 from config import DEFAULT_CONFIG, SystemConfig
 from src.beacon_simulator import BeaconSimulator
 from src.disturbance_simulator import DisturbanceSimulator
+from src.kalman_tracker import KalmanBeaconTracker
 from src.visualizer import TrackingVisualizer
 
 
 def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
-    """Run the live beacon motion and disturbance simulation loop.
+    """Run the live Kalman predictive tracking demonstration loop.
     
     Args:
         config: System configuration settings.
     """
-    print("=" * 68)
-    print("SIH Part 2: Beacon Motion & Disturbance Simulation (Phase 2)")
-    print("=" * 68)
+    print("=" * 72)
+    print("SIH Part 2: Kalman Predictive Tracking & Disturbance Handling (Phase 3)")
+    print("=" * 72)
+    print("Color Legend:")
+    print("  [GREEN]  - Ground Truth trajectory (GT)")
+    print("  [YELLOW] - Noisy optical measurements (MEAS) - disappears during occlusion")
+    print("  [BLUE]   - Kalman filter track (predicts continuously through occlusions)")
+    print("-" * 72)
     print("Controls:")
-    print("  [SPACE] - Pause / Resume simulation")
-    print("  [R]     - Reset simulation to initial state")
-    print("  [Q/ESC] - Quit demonstration")
-    print("=" * 68)
+    print("  [SPACE]  - Pause / Resume simulation")
+    print("  [R]      - Reset simulation and tracker to initial state")
+    print("  [Q/ESC]  - Quit demonstration")
+    print("=" * 72)
     
     beacon_sim = BeaconSimulator(config.beacon)
     disturbance_sim = DisturbanceSimulator(config.disturbance)
+    tracker = KalmanBeaconTracker(config.kalman, config.tracking)
     visualizer = TrackingVisualizer(config.visualizer)
     
     window_name = config.visualizer.window_name
@@ -57,20 +67,22 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
             if not paused:
                 timestamp = frame_idx * dt
                 
-                # 1. Step ground-truth beacon motion
+                # 1. Ground truth beacon motion simulation
                 ground_truth_pos = beacon_sim.step(dt)
                 
-                # 2. Apply disturbances, sensor noise, and scheduled occlusions
+                # 2. Optical disturbance, measurement noise, and occlusion simulation
                 measurement = disturbance_sim.apply_disturbances(ground_truth_pos, timestamp, frame_idx)
                 
-                # Conceptual Phase 2 clean data interface:
-                # measured_position: Optional[Tuple[float, float]] = measurement.position if measurement.detected else None
-                # detection_available: bool = measurement.detected
+                # 3. Kalman Filter Predictive Tracking
+                # Note: Tracker ONLY receives the optical measurement (or None when occluded).
+                # Tracker has NO access to ground truth.
+                tracking_result = tracker.process_frame(measurement, timestamp)
                 
-                # 3. Render visualization frame
-                canvas = visualizer.render_simulation_frame(
+                # 4. Render visualization combining GT, Measurement, and Kalman Track
+                canvas = visualizer.render_frame(
                     ground_truth=ground_truth_pos,
                     measurement=measurement,
+                    tracking_result=tracking_result,
                     frame_idx=frame_idx,
                     fps_display=actual_fps
                 )
@@ -78,7 +90,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 cv2.imshow(window_name, canvas)
                 frame_idx += 1
             else:
-                # If paused, keep displaying the current canvas
+                # If paused, wait for key input
                 key = cv2.waitKey(30) & 0xFF
                 if key in (ord('q'), ord('Q'), 27):
                     break
@@ -87,6 +99,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 elif key in (ord('r'), ord('R')):
                     beacon_sim.reset()
                     disturbance_sim.reset()
+                    tracker.reset()
                     visualizer.reset()
                     frame_idx = 0
                     paused = False
@@ -99,7 +112,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 actual_fps = 0.9 * actual_fps + 0.1 * (1.0 / elapsed)
             prev_time = curr_time
             
-            # Maintain nominal frame rate
+            # Frame rate timing control
             compute_time = curr_time - loop_start
             wait_ms = max(1, int((dt - compute_time) * 1000))
             
@@ -112,6 +125,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
             elif key in (ord('r'), ord('R')):
                 beacon_sim.reset()
                 disturbance_sim.reset()
+                tracker.reset()
                 visualizer.reset()
                 frame_idx = 0
 

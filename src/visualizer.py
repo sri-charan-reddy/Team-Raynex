@@ -8,7 +8,7 @@ This module provides:
   4. Virtual Camera Field of View (FOV) rectangle and optical axis crosshair
 - Visual cues for state machine transitions (TRACKING, PREDICTING, REACQUIRING, LOST).
 - Real-time telemetry Heads-Up Display (HUD) indicating Frame, Detection, State,
-  Confidence, Miss Count, Measurement Acceptance, and Virtual Camera FOV status.
+  Confidence, Miss Count, Measurement Acceptance, Virtual Camera FOV, and Pan/Tilt Controller state.
 """
 
 from typing import List, Optional, Tuple
@@ -18,6 +18,7 @@ import numpy as np
 from config import VisualizerConfig
 from src.tracking_state import BeaconMeasurement, TrackingResult, TrackingState
 from src.virtual_camera import VirtualCamera, CameraTelemetry
+from src.camera_controller import CameraController, ControllerMode
 
 
 class TrackingVisualizer:
@@ -63,7 +64,8 @@ class TrackingVisualizer:
         tracking_result: TrackingResult,
         frame_idx: int,
         fps_display: float = 30.0,
-        camera: Optional[VirtualCamera] = None
+        camera: Optional[VirtualCamera] = None,
+        controller: Optional[CameraController] = None
     ) -> np.ndarray:
         """Render a single visualization frame combining GT, Measurement, Kalman track, Camera FOV, and HUD.
         
@@ -74,6 +76,7 @@ class TrackingVisualizer:
             frame_idx: Current simulation frame count.
             fps_display: Live measured FPS.
             camera: Optional VirtualCamera instance to render FOV bounds.
+            controller: Optional CameraController instance to render pan/tilt telemetry.
             
         Returns:
             np.ndarray: BGR image canvas suitable for cv2.imshow.
@@ -88,7 +91,7 @@ class TrackingVisualizer:
 
         # 2. Draw Virtual Camera FOV rectangle if enabled
         if camera is not None and getattr(self.config, "show_camera_fov", True):
-            self._draw_camera_fov(canvas, camera)
+            self._draw_camera_fov(canvas, camera, tracking_result)
 
         # 3. Update trajectory histories
         self.ground_truth_history.append(ground_truth)
@@ -153,12 +156,17 @@ class TrackingVisualizer:
             cv2.putText(canvas, mode_lbl, (k_x + 18, k_y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, state_col, 1, cv2.LINE_AA)
 
         # 10. Draw Telemetry HUD
-        self._draw_hud(canvas, ground_truth, measurement, tracking_result, frame_idx, fps_display, camera)
+        self._draw_hud(canvas, ground_truth, measurement, tracking_result, frame_idx, fps_display, camera, controller)
 
         return canvas
 
-    def _draw_camera_fov(self, canvas: np.ndarray, camera: VirtualCamera) -> None:
-        """Render virtual camera FOV bounding box and center reticle."""
+    def _draw_camera_fov(
+        self,
+        canvas: np.ndarray,
+        camera: VirtualCamera,
+        tracking_result: Optional[TrackingResult] = None
+    ) -> None:
+        """Render virtual camera FOV bounding box, optical center reticle, and servo line."""
         min_x, max_x, min_y, max_y = camera.get_fov_bounds()
         x1, y1 = int(min_x), int(min_y)
         x2, y2 = int(max_x), int(max_y)
@@ -184,8 +192,13 @@ class TrackingVisualizer:
 
         # Center reticle
         cx, cy = int(camera.center[0]), int(camera.center[1])
-        cv2.drawMarker(canvas, (cx, cy), self.COLOR_CAMERA_FOV, markerType=cv2.MARKER_CROSS, markerSize=12, thickness=1, line_type=cv2.LINE_AA)
+        cv2.drawMarker(canvas, (cx, cy), self.COLOR_CAMERA_FOV, markerType=cv2.MARKER_CROSS, markerSize=14, thickness=1, line_type=cv2.LINE_AA)
         
+        # Draw dotted / thin line from camera center to Kalman track to show servo error
+        if tracking_result is not None and tracking_result.state in (TrackingState.TRACKING, TrackingState.PREDICTING, TrackingState.REACQUIRING):
+            kx, ky = int(tracking_result.position[0]), int(tracking_result.position[1])
+            cv2.line(canvas, (cx, cy), (kx, ky), (80, 100, 140), 1, lineType=cv2.LINE_AA)
+
         # FOV label
         fov_str = f"VIRTUAL CAMERA FOV [{int(camera.fov_width)}x{int(camera.fov_height)}]"
         cv2.putText(canvas, fov_str, (x1 + 8, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1, cv2.LINE_AA)
@@ -206,11 +219,12 @@ class TrackingVisualizer:
         tracking_result: TrackingResult,
         frame_idx: int,
         fps: float,
-        camera: Optional[VirtualCamera] = None
+        camera: Optional[VirtualCamera] = None,
+        controller: Optional[CameraController] = None
     ) -> None:
         """Render top-left telemetry HUD card and status alert banners."""
-        card_w = 480
-        card_h = 320 if camera is not None else 275
+        card_w = 490
+        card_h = 350 if camera is not None else 275
         sub_img = canvas[15:15 + card_h, 15:15 + card_w]
         white_rect = np.zeros(sub_img.shape, dtype=np.uint8)
         res = cv2.addWeighted(sub_img, 0.35, white_rect, 0.65, 1.0)
@@ -218,7 +232,7 @@ class TrackingVisualizer:
         cv2.rectangle(canvas, (15, 15), (15 + card_w, 15 + card_h), (60, 68, 80), 1)
 
         # Header
-        cv2.putText(canvas, "SIH PART 2 - TRACKING & VIRTUAL CAMERA", (26, 38),
+        cv2.putText(canvas, "SIH PART 2 - TRACKING & CAMERA CONTROLLER", (26, 38),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, (100, 200, 255), 1, cv2.LINE_AA)
         cv2.line(canvas, (26, 46), (26 + card_w - 24, 46), (60, 68, 80), 1)
 
@@ -286,7 +300,7 @@ class TrackingVisualizer:
         
         # Draw confidence bar
         bar_x = 240
-        bar_w = 200
+        bar_w = 210
         bar_h = 10
         cv2.rectangle(canvas, (bar_x, line_y - 10), (bar_x + bar_w, line_y), (50, 54, 62), -1)
         fill_w = int(bar_w * max(0.0, min(1.0, tracking_result.confidence)))
@@ -311,21 +325,23 @@ class TrackingVisualizer:
         cv2.putText(canvas, acc_str, (26, line_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, acc_col, 1, cv2.LINE_AA)
 
-        # 10. Virtual Camera FOV Telemetry (if camera provided)
+        # 10. Virtual Camera & Controller Telemetry (if camera provided)
         if camera is not None:
             line_y += spacing
             in_fov = camera.is_in_fov(ground_truth)
             fov_color = (50, 220, 50) if in_fov else (0, 165, 255)
             fov_status = "INSIDE FOV" if in_fov else "OUTSIDE FOV"
-            dx, dy = camera.get_relative_position(ground_truth)
-            cam_str = f"Camera FOV: {fov_status}  |  Rel Error: ({dx:+.1f}, {dy:+.1f}) px"
+            cam_str = f"Camera Center: ({camera.pan:.1f}, {camera.tilt:.1f})  |  Beacon: {fov_status}"
             cv2.putText(canvas, cam_str, (26, line_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.44, fov_color, 1, cv2.LINE_AA)
 
-            line_y += spacing
-            pt_str = f"Camera Pan/Tilt: ({camera.pan:.1f}, {camera.tilt:.1f})  |  FOV: {int(camera.fov_width)}x{int(camera.fov_height)}"
-            cv2.putText(canvas, pt_str, (26, line_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 170, 110), 1, cv2.LINE_AA)
+            if controller is not None:
+                line_y += spacing
+                ctrl_telem = controller.get_telemetry()
+                ctrl_col = (50, 220, 50) if ctrl_telem.mode == ControllerMode.TRACKING_SERVO else ((0, 165, 255) if ctrl_telem.mode == ControllerMode.PREDICTIVE_SERVO else (180, 170, 110))
+                ctrl_str = f"Pan/Tilt Servo: {ctrl_telem.mode.name} | Err: ({ctrl_telem.error_x:+.1f}, {ctrl_telem.error_y:+.1f}) px"
+                cv2.putText(canvas, ctrl_str, (26, line_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.43, ctrl_col, 1, cv2.LINE_AA)
 
         # Top Center Alert Banners
         if measurement.detected and not tracking_result.measurement_accepted:
@@ -343,14 +359,14 @@ class TrackingVisualizer:
             cv2.putText(canvas, banner_text, (b_x, 42),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
         elif tracking_result.state == TrackingState.PREDICTING:
-            banner_text = f"--- OCCLUSION: KALMAN PREDICTING (Miss Frame {tracking_result.miss_count}) ---"
-            text_size = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)[0]
+            banner_text = f"--- OCCLUSION: KALMAN PREDICTIVE PAN/TILT SERVOING (Miss {tracking_result.miss_count}) ---"
+            text_size = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 2)[0]
             b_x = (self.config.canvas_width - text_size[0]) // 2
             cv2.rectangle(canvas, (b_x - 14, 18), (b_x + text_size[0] + 14, 52), (0, 100, 200), -1)
             cv2.putText(canvas, banner_text, (b_x, 42),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 2, cv2.LINE_AA)
         elif tracking_result.state == TrackingState.REACQUIRING:
-            banner_text = "--- BEACON REACQUIRED: RE-LOCKING TRACKING ---"
+            banner_text = "--- BEACON REACQUIRED: RE-LOCKING TRACKING & SERVO ---"
             text_size = cv2.getTextSize(banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)[0]
             b_x = (self.config.canvas_width - text_size[0]) // 2
             cv2.rectangle(canvas, (b_x - 14, 18), (b_x + text_size[0] + 14, 52), (0, 140, 0), -1)

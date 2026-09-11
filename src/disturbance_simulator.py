@@ -12,20 +12,22 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from config import DisturbanceConfig
+from src.atmospheric_turbulence import AtmosphericTurbulence
 from src.tracking_state import BeaconMeasurement
 
 
 class DisturbanceSimulator:
-    """Simulates optical measurement noise, sensor jitter, temporary loss, and outliers."""
+    """Simulates optical measurement noise, sensor jitter, atmospheric turbulence, temporary loss, and outliers."""
 
     def __init__(self, config: Optional[DisturbanceConfig] = None) -> None:
-        """Initialize disturbance, occlusion, and outlier parameters.
+        """Initialize disturbance, occlusion, turbulence, and outlier parameters.
         
         Args:
             config: Disturbance configuration settings.
         """
         self.config = config or DisturbanceConfig()
         self.rng = np.random.RandomState(self.config.random_seed)
+        self.turbulence = AtmosphericTurbulence(getattr(self.config, "turbulence", None))
         self.current_frame: int = 0
         self.manual_outlier_remaining_frames: int = 0
         self.manual_outlier_pos: Tuple[float, float] = (1100.0, 100.0)
@@ -82,16 +84,16 @@ class DisturbanceSimulator:
         self.manual_outlier_pos = outlier_pos
         self.manual_outlier_remaining_frames = duration_frames
 
-    def add_measurement_noise(self, true_pos: Tuple[float, float]) -> Tuple[float, float]:
-        """Add Gaussian sensor noise and camera jitter to the ground-truth position.
+    def add_measurement_noise(self, optical_pos: Tuple[float, float]) -> Tuple[float, float]:
+        """Add Gaussian sensor noise and camera jitter to the optical position.
         
         Args:
-            true_pos: True (x, y) beacon coordinates.
+            optical_pos: (x, y) beacon coordinates after atmospheric propagation.
             
         Returns:
             Noisy (x, y) coordinates representing optical detection.
         """
-        meas_x, meas_y = true_pos[0], true_pos[1]
+        meas_x, meas_y = optical_pos[0], optical_pos[1]
 
         # 1. Optical sensor measurement noise
         if self.config.enable_measurement_noise and self.config.measurement_noise_std > 0:
@@ -115,7 +117,8 @@ class DisturbanceSimulator:
     ) -> BeaconMeasurement:
         """Produce an optical BeaconMeasurement from ground-truth position.
         
-        Evaluates outliers, occlusions, and Gaussian measurement noise.
+        Evaluates outliers, occlusions, atmospheric turbulence, and Gaussian measurement noise.
+        Ground truth is passed by value and is never altered.
         
         Args:
             ground_truth_pos: True (x, y) beacon position.
@@ -148,18 +151,27 @@ class DisturbanceSimulator:
                 raw_bbox=None
             )
 
-        # 3. Normal noisy detection
-        noisy_pos = self.add_measurement_noise(ground_truth_pos)
+        # 3. Step A: Optical observation undergoes atmospheric turbulence
+        turb_pos = self.turbulence.apply(ground_truth_pos)
+
+        # 4. Step B: Sensor noise & camera jitter
+        noisy_pos = self.add_measurement_noise(turb_pos)
+
+        # 5. Step C: Scintillation effect on detection confidence
+        conf = float(np.clip(self.config.default_confidence * self.turbulence.scintillation_factor, 0.1, 1.0))
+
         return BeaconMeasurement(
             timestamp=timestamp,
             position=noisy_pos,
             detected=True,
-            confidence=self.config.default_confidence,
+            confidence=conf,
             raw_bbox=None
         )
 
     def reset(self) -> None:
-        """Reset the disturbance simulator and its internal RNG."""
+        """Reset the disturbance simulator, turbulence model, and internal RNG."""
         self.rng = np.random.RandomState(self.config.random_seed)
+        self.turbulence.reset()
         self.current_frame = 0
         self.manual_outlier_remaining_frames = 0
+

@@ -37,18 +37,18 @@ from src.virtual_camera import VirtualCamera
 from src.camera_controller import CameraController
 from src.local_search import LocalSearch
 from src.kalman_tracker import KalmanBeaconTracker
-from src.tracking_state import TrackingState
+from src.tracking_state import TrackingState, PerformanceTracker
 from src.visualizer import TrackingVisualizer
 
 
 def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
-    """Run the live predictive tracking, local search, and camera control demonstration loop.
+    """Run the live predictive tracking, local search, turbulence, and camera control demonstration loop.
     
     Args:
         config: System configuration settings.
     """
     print("=" * 78)
-    print("SIH Part 2: Predictive Tracking, Local Search & Camera Control")
+    print("SIH Part 2: Predictive Tracking, Turbulence Simulation & Camera Control")
     print("=" * 78)
     print("Scenarios Scheduled:")
     print("  - Frames   0.. 59: Pan/Tilt Slew & Acquisition [TRACKING_SERVO]")
@@ -58,6 +58,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
     print("-" * 78)
     print("Interactive Controls:")
     print("  [SPACE]  - Pause / Resume simulation")
+    print("  [T]      - Toggle / Cycle Atmospheric Turbulence (OFF -> LOW -> MED -> HIGH)")
     print("  [F]      - Inject a 60-frame (~2 sec) false outlier at (1100, 100)")
     print("  [R]      - Reset simulation, camera, search, and tracker to initial state")
     print("  [Q/ESC]  - Quit demonstration")
@@ -69,6 +70,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
     local_search = LocalSearch(config.search)
     camera_controller = CameraController(camera, config.controller)
     tracker = KalmanBeaconTracker(config.kalman, config.tracking)
+    perf_tracker = PerformanceTracker()
     visualizer = TrackingVisualizer(config.visualizer)
     
     window_name = config.visualizer.window_name
@@ -81,6 +83,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
     
     prev_time = time.time()
     actual_fps = float(fps)
+    last_metrics = None
     
     try:
         while True:
@@ -92,7 +95,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 # 1. Ground truth beacon motion simulation
                 ground_truth_pos = beacon_sim.step(dt)
                 
-                # 2. Disturbance simulation (noise, scheduled occlusions, scheduled/manual outliers)
+                # 2. Disturbance simulation (atmospheric turbulence, noise, scheduled occlusions, outliers)
                 measurement = disturbance_sim.apply_disturbances(ground_truth_pos, timestamp, frame_idx)
                 
                 # 3. Kalman Filter with Outlier Rejection & State Machine (PREDICTING -> SEARCHING -> LOST)
@@ -112,7 +115,21 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     target_override=search_target if is_searching else None
                 )
                 
-                # 6. Render visual frame
+                # Record loop compute time
+                compute_time_s = time.time() - loop_start
+                
+                # 6. Update Performance Metrics
+                metrics = perf_tracker.update(
+                    ground_truth=ground_truth_pos,
+                    measurement=measurement,
+                    tracking_result=tracking_result,
+                    frame_idx=frame_idx,
+                    timestamp=timestamp,
+                    frame_compute_time_s=compute_time_s
+                )
+                last_metrics = metrics
+                
+                # 7. Render visual frame
                 canvas = visualizer.render_frame(
                     ground_truth=ground_truth_pos,
                     measurement=measurement,
@@ -121,7 +138,9 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     fps_display=actual_fps,
                     camera=camera,
                     controller=camera_controller,
-                    search=local_search
+                    search=local_search,
+                    turbulence=disturbance_sim.turbulence,
+                    metrics=metrics
                 )
                 
                 cv2.imshow(window_name, canvas)
@@ -133,6 +152,9 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     break
                 elif key == ord(' '):
                     paused = False
+                elif key in (ord('t'), ord('T')):
+                    new_lvl = disturbance_sim.turbulence.toggle_level()
+                    print(f"[Frame {frame_idx}] Atmospheric turbulence level changed to: {new_lvl.value}")
                 elif key in (ord('f'), ord('F')):
                     disturbance_sim.trigger_manual_outlier((1100.0, 100.0), duration_frames=60)
                     print(f"[Frame {frame_idx}] Manual outlier triggered at (1100.0, 100.0) for 60 frames (~2 sec).")
@@ -143,6 +165,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     local_search.reset()
                     camera_controller.reset()
                     tracker.reset()
+                    perf_tracker.reset()
                     visualizer.reset()
                     frame_idx = 0
                     paused = False
@@ -165,6 +188,9 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 break
             elif key == ord(' '):
                 paused = True
+            elif key in (ord('t'), ord('T')):
+                new_lvl = disturbance_sim.turbulence.toggle_level()
+                print(f"[Frame {frame_idx}] Atmospheric turbulence level changed to: {new_lvl.value}")
             elif key in (ord('f'), ord('F')):
                 disturbance_sim.trigger_manual_outlier((1100.0, 100.0), duration_frames=60)
                 print(f"[Frame {frame_idx}] Manual outlier triggered at (1100.0, 100.0) for 60 frames (~2 sec).")
@@ -175,12 +201,28 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 local_search.reset()
                 camera_controller.reset()
                 tracker.reset()
+                perf_tracker.reset()
                 visualizer.reset()
                 frame_idx = 0
 
     finally:
         cv2.destroyAllWindows()
-        print("Demonstration ended.")
+        print("\n" + "=" * 78)
+        print("SIH PART 2: FINAL TRACKING PERFORMANCE SUMMARY")
+        print("=" * 78)
+        if last_metrics is not None:
+            print(f"  Simulation Duration:       {last_metrics.simulation_duration:.2f} s ({last_metrics.total_frames} frames)")
+            print(f"  Average Frame Rate:        {last_metrics.avg_fps:.1f} FPS")
+            print(f"  Initial Lock Time:         {last_metrics.acquisition_time_s:.2f} s (Frame #{last_metrics.acquisition_frame})")
+            print(f"  Average Tracking Error:    {last_metrics.avg_tracking_error_px:.2f} px")
+            print(f"  Maximum Tracking Error:    {last_metrics.max_tracking_error_px:.2f} px")
+            print(f"  Track Lock Retention:      {last_metrics.lock_retention_pct:.1f}%")
+            print(f"  Average Processing Time:   {last_metrics.avg_processing_time_ms:.3f} ms / frame")
+            print(f"  Temporary Loss Intervals:  {last_metrics.occlusion_count}")
+            print(f"  Successful Reacquisitions: {last_metrics.reacquisition_count}")
+            print(f"  Rejected False Outliers:   {last_metrics.rejected_outlier_count}")
+        print("=" * 78)
+        print("Demonstration ended successfully.")
 
 
 def main() -> None:

@@ -17,10 +17,11 @@ import cv2
 import numpy as np
 
 from config import VisualizerConfig
-from src.tracking_state import BeaconMeasurement, TrackingResult, TrackingState
+from src.tracking_state import BeaconMeasurement, TrackingResult, TrackingState, PerformanceMetrics
 from src.virtual_camera import VirtualCamera, CameraTelemetry
 from src.camera_controller import CameraController, ControllerMode
 from src.local_search import LocalSearch, LocalSearchTelemetry
+from src.atmospheric_turbulence import AtmosphericTurbulence, TurbulenceLevel, TurbulenceTelemetry
 
 
 class TrackingVisualizer:
@@ -70,9 +71,11 @@ class TrackingVisualizer:
         fps_display: float = 30.0,
         camera: Optional[VirtualCamera] = None,
         controller: Optional[CameraController] = None,
-        search: Optional[LocalSearch] = None
+        search: Optional[LocalSearch] = None,
+        turbulence: Optional[AtmosphericTurbulence] = None,
+        metrics: Optional[PerformanceMetrics] = None
     ) -> np.ndarray:
-        """Render a single visualization frame combining GT, Measurement, Kalman track, Camera FOV, Search, and HUD.
+        """Render a single visualization frame combining GT, Measurement, Kalman track, Camera FOV, Search, Turbulence, and HUD.
         
         Args:
             ground_truth: True (x, y) beacon position.
@@ -83,6 +86,8 @@ class TrackingVisualizer:
             camera: Optional VirtualCamera instance to render FOV bounds.
             controller: Optional CameraController instance to render pan/tilt telemetry.
             search: Optional LocalSearch instance to render local search bounds and target.
+            turbulence: Optional AtmosphericTurbulence instance to render turbulence telemetry.
+            metrics: Optional PerformanceMetrics instance to display tracking accuracy and latency.
             
         Returns:
             np.ndarray: BGR image canvas suitable for cv2.imshow.
@@ -166,7 +171,19 @@ class TrackingVisualizer:
             cv2.putText(canvas, mode_lbl, (k_x + 18, k_y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, state_col, 1, cv2.LINE_AA)
 
         # 11. Draw Telemetry HUD
-        self._draw_hud(canvas, ground_truth, measurement, tracking_result, frame_idx, fps_display, camera, controller, search)
+        self._draw_hud(
+            canvas,
+            ground_truth,
+            measurement,
+            tracking_result,
+            frame_idx,
+            fps_display,
+            camera,
+            controller,
+            search,
+            turbulence,
+            metrics
+        )
 
         return canvas
 
@@ -216,7 +233,7 @@ class TrackingVisualizer:
         cv2.line(canvas, (x1, y1), (x1, y1 + b_len), col, 2)
         # Top-right
         cv2.line(canvas, (x2, y1), (x2 - b_len, y1), col, 2)
-        cv2.line(canvas, (x2, y1), (x2 - b_len, y1), col, 2)
+        cv2.line(canvas, (x2, y1), (x2, y1 + b_len), col, 2)
         # Bottom-left
         cv2.line(canvas, (x1, y2), (x1 + b_len, y2), col, 2)
         cv2.line(canvas, (x1, y2), (x1, y2 - b_len), col, 2)
@@ -255,11 +272,13 @@ class TrackingVisualizer:
         fps: float,
         camera: Optional[VirtualCamera] = None,
         controller: Optional[CameraController] = None,
-        search: Optional[LocalSearch] = None
+        search: Optional[LocalSearch] = None,
+        turbulence: Optional[AtmosphericTurbulence] = None,
+        metrics: Optional[PerformanceMetrics] = None
     ) -> None:
         """Render top-left telemetry HUD card and status alert banners."""
-        card_w = 500
-        card_h = 370 if (camera is not None and search is not None) else 320
+        card_w = 510
+        card_h = 425 if (camera is not None and turbulence is not None) else 350
         sub_img = canvas[15:15 + card_h, 15:15 + card_w]
         white_rect = np.zeros(sub_img.shape, dtype=np.uint8)
         res = cv2.addWeighted(sub_img, 0.35, white_rect, 0.65, 1.0)
@@ -267,7 +286,7 @@ class TrackingVisualizer:
         cv2.rectangle(canvas, (15, 15), (15 + card_w, 15 + card_h), (60, 68, 80), 1)
 
         # Header
-        cv2.putText(canvas, "SIH PART 2 - TRACKING & LOCAL SEARCH", (26, 38),
+        cv2.putText(canvas, "SIH PART 2 - PREDICTIVE TRACKING & DISTURBANCE", (26, 38),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, (100, 200, 255), 1, cv2.LINE_AA)
         cv2.line(canvas, (26, 46), (26 + card_w - 24, 46), (60, 68, 80), 1)
 
@@ -335,7 +354,7 @@ class TrackingVisualizer:
         
         # Draw confidence bar
         bar_x = 240
-        bar_w = 220
+        bar_w = 230
         bar_h = 10
         cv2.rectangle(canvas, (bar_x, line_y - 10), (bar_x + bar_w, line_y), (50, 54, 62), -1)
         fill_w = int(bar_w * max(0.0, min(1.0, tracking_result.confidence)))
@@ -370,7 +389,7 @@ class TrackingVisualizer:
             cv2.putText(canvas, cam_str, (26, line_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.44, fov_color, 1, cv2.LINE_AA)
 
-        # 11. Local Search & Controller Telemetry
+        # 11. Local Search Telemetry
         if search is not None:
             line_y += spacing
             if tracking_result.state == TrackingState.SEARCHING:
@@ -382,6 +401,26 @@ class TrackingVisualizer:
             s_str = f"Local Search: {s_status}  |  Radius: {int(search.config.search_radius_px)} px"
             cv2.putText(canvas, s_str, (26, line_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.43, s_col, 1, cv2.LINE_AA)
+
+        # 12. Atmospheric Turbulence Telemetry
+        if turbulence is not None:
+            line_y += spacing
+            t_telem = turbulence.get_telemetry()
+            if t_telem.enabled:
+                t_col = (0, 220, 255) if t_telem.level == TurbulenceLevel.MEDIUM else ((50, 220, 50) if t_telem.level == TurbulenceLevel.LOW else (0, 140, 255))
+                t_str = f"Atmospheric Turb: {t_telem.level.value} | Offset: ({t_telem.offset_x:+.1f}, {t_telem.offset_y:+.1f}) px | Disp: {t_telem.displacement:.1f} px"
+            else:
+                t_col = self.COLOR_TEXT_MUTED
+                t_str = "Atmospheric Turb: OFF (Press [T] to toggle)"
+            cv2.putText(canvas, t_str, (26, line_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.43, t_col, 1, cv2.LINE_AA)
+
+        # 13. Tracking Performance Error Telemetry
+        if metrics is not None:
+            line_y += spacing
+            p_str = f"Track Error: {metrics.current_tracking_error_px:.1f} px (Avg: {metrics.avg_tracking_error_px:.1f} px, Max: {metrics.max_tracking_error_px:.1f} px) | Lock: {metrics.lock_retention_pct:.1f}%"
+            cv2.putText(canvas, p_str, (26, line_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 210, 255), 1, cv2.LINE_AA)
 
         # Top Center Alert Banners
         if measurement.detected and not tracking_result.measurement_accepted:

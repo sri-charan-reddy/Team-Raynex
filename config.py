@@ -29,6 +29,42 @@ class BeaconSimConfig:
     random_seed: Optional[int] = 42                    # seed for reproducible ground truth motion
 
 
+from enum import Enum
+
+
+class TurbulenceLevel(Enum):
+    """Atmospheric turbulence severity levels."""
+    OFF = "OFF"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+@dataclass
+class AtmosphericTurbulenceConfig:
+    """Configuration parameters for atmospheric optical turbulence simulation."""
+    enabled: bool = True
+    level: TurbulenceLevel = TurbulenceLevel.MEDIUM
+    temporal_correlation: float = 0.88   # Autoregressive correlation coefficient rho in [0, 1)
+    
+    # 1D Standard deviation of position perturbation for each level (pixels)
+    std_low: float = 3.0
+    std_medium: float = 6.5
+    std_high: float = 14.0
+    
+    # Maximum allowable displacement envelope limits (pixels)
+    max_displacement_low: float = 8.0
+    max_displacement_medium: float = 18.0
+    max_displacement_high: float = 35.0
+    
+    # Scintillation / intensity fluctuation settings
+    enable_scintillation: bool = True
+    scintillation_std: float = 0.08      # Standard deviation of normalized intensity fluctuation
+    
+    # Deterministic random seed
+    random_seed: Optional[int] = 202
+
+
 @dataclass
 class DisturbanceConfig:
     """Disturbance, measurement noise, and occlusion simulation parameters."""
@@ -36,6 +72,7 @@ class DisturbanceConfig:
     measurement_noise_std: float = 4.0                 # Standard deviation of optical measurement noise (pixels)
     enable_jitter: bool = True
     jitter_std: float = 1.0                            # High-frequency camera jitter noise (pixels)
+    turbulence: AtmosphericTurbulenceConfig = field(default_factory=AtmosphericTurbulenceConfig)
     enable_occlusions: bool = True
     # Demonstrates Scenario B (short loss: 60..80), Scenario C (extended loss: 150..220 triggering local search)
     occlusion_intervals: List[Tuple[int, int]] = field(

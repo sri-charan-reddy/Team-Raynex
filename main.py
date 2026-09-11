@@ -1,15 +1,17 @@
-"""Main entry point and standalone demonstration script for Part 2 (Phase 4).
+"""Main entry point and standalone demonstration script for Part 2.
 
 This script coordinates:
 1. Beacon ground-truth motion simulation (BeaconSimulator).
 2. Optical disturbance, measurement noise, occlusions, and outlier injection (DisturbanceSimulator).
-3. Kalman-filter-based predictive tracking with outlier rejection and recovery state machine (KalmanBeaconTracker).
-4. Real-time OpenCV visualization displaying:
+3. Virtual Camera Model with configurable Field of View (VirtualCamera).
+4. Kalman-filter-based predictive tracking with outlier rejection and recovery state machine (KalmanBeaconTracker).
+5. Real-time OpenCV visualization displaying:
    - GREEN: Ground Truth (GT)
    - YELLOW: Optical Measurements (MEAS)
    - RED MARKER: Rejected Outlier Measurements
    - BLUE: Kalman Predicted / Corrected Track
-   - Comprehensive HUD telemetry (State, Confidence, Miss Count, Acceptance status).
+   - SLATE RECTANGLE: Virtual Camera Field of View (FOV)
+   - Comprehensive HUD telemetry (State, Confidence, Miss Count, Camera FOV Telemetry).
 
 Demonstration Scenarios Covered:
 - Scenario A: Normal tracking (TRACKING)
@@ -28,18 +30,19 @@ import cv2
 from config import DEFAULT_CONFIG, SystemConfig
 from src.beacon_simulator import BeaconSimulator
 from src.disturbance_simulator import DisturbanceSimulator
+from src.virtual_camera import VirtualCamera
 from src.kalman_tracker import KalmanBeaconTracker
 from src.visualizer import TrackingVisualizer
 
 
 def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
-    """Run the live robust predictive tracking demonstration loop.
+    """Run the live robust predictive tracking and virtual camera demonstration loop.
     
     Args:
         config: System configuration settings.
     """
     print("=" * 76)
-    print("SIH Part 2: Robust Predictive Tracking & Outlier Rejection (Phase 4)")
+    print("SIH Part 2: Robust Predictive Tracking & Virtual Camera Model")
     print("=" * 76)
     print("Scenarios Scheduled:")
     print("  - Frames   0.. 59: Normal tracking [TRACKING]")
@@ -50,12 +53,13 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
     print("Interactive Controls:")
     print("  [SPACE]  - Pause / Resume simulation")
     print("  [F]      - Inject a 60-frame (~2 sec) false outlier at (1100, 100)")
-    print("  [R]      - Reset simulation and tracker to initial state")
+    print("  [R]      - Reset simulation, camera, and tracker to initial state")
     print("  [Q/ESC]  - Quit demonstration")
     print("=" * 76)
     
     beacon_sim = BeaconSimulator(config.beacon)
     disturbance_sim = DisturbanceSimulator(config.disturbance)
+    camera = VirtualCamera(config.camera)
     tracker = KalmanBeaconTracker(config.kalman, config.tracking)
     visualizer = TrackingVisualizer(config.visualizer)
     
@@ -88,13 +92,14 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 # Ground truth is never accessed by the tracker.
                 tracking_result = tracker.process_frame(measurement, timestamp)
                 
-                # 4. Render visual frame
+                # 4. Render visual frame (including Virtual Camera FOV)
                 canvas = visualizer.render_frame(
                     ground_truth=ground_truth_pos,
                     measurement=measurement,
                     tracking_result=tracking_result,
                     frame_idx=frame_idx,
-                    fps_display=actual_fps
+                    fps_display=actual_fps,
+                    camera=camera
                 )
                 
                 cv2.imshow(window_name, canvas)
@@ -112,6 +117,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 elif key in (ord('r'), ord('R')):
                     beacon_sim.reset()
                     disturbance_sim.reset()
+                    camera.reset()
                     tracker.reset()
                     visualizer.reset()
                     frame_idx = 0
@@ -141,6 +147,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
             elif key in (ord('r'), ord('R')):
                 beacon_sim.reset()
                 disturbance_sim.reset()
+                camera.reset()
                 tracker.reset()
                 visualizer.reset()
                 frame_idx = 0

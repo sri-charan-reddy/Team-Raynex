@@ -4,6 +4,7 @@ from src.tracking_state import TrackingState, BeaconMeasurement, TrackingResult
 from src.kalman_tracker import KalmanBeaconTracker
 from src.beacon_simulator import BeaconSimulator
 from src.disturbance_simulator import DisturbanceSimulator
+from src.virtual_camera import VirtualCamera, CameraTelemetry
 from src.visualizer import TrackingVisualizer
 
 __all__ = [
@@ -13,5 +14,7 @@ __all__ = [
     "KalmanBeaconTracker",
     "BeaconSimulator",
     "DisturbanceSimulator",
+    "VirtualCamera",
+    "CameraTelemetry",
     "TrackingVisualizer",
 ]

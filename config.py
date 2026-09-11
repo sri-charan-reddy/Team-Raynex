@@ -3,6 +3,7 @@
 This module defines all tunable parameters for:
 - Beacon Motion Simulation (initial coordinates, velocity, boundary margins, random seed)
 - Disturbance & Occlusion Simulation (noise std, jitter std, occlusion intervals, outliers)
+- Virtual Camera Model (center/pan/tilt, FOV width/height, arena boundaries)
 - Tracking State Machine & Gating (gating threshold, max prediction frames, confidence dynamics)
 - Kalman Filter (process & measurement noise, covariance matrices)
 - Visualizer & Demonstration settings (window size, frame rates, color schemes)
@@ -47,6 +48,20 @@ class DisturbanceConfig:
 
 
 @dataclass
+class VirtualCameraConfig:
+    """Virtual camera field-of-view and pointing parameters."""
+    arena_width: int = 1280
+    arena_height: int = 720
+    initial_center: Tuple[float, float] = (640.0, 360.0)
+    fov_width: float = 500.0                           # Horizontal FOV in world pixels
+    fov_height: float = 380.0                          # Vertical FOV in world pixels
+    min_pan: float = 0.0                               # Minimum pan limit in world pixels
+    max_pan: float = 1280.0                            # Maximum pan limit in world pixels
+    min_tilt: float = 0.0                              # Minimum tilt limit in world pixels
+    max_tilt: float = 720.0                            # Maximum tilt limit in world pixels
+
+
+@dataclass
 class KalmanConfig:
     """Kalman filter tuning parameters."""
     dt: float = 1.0 / 30.0                             # Nominal time step (30 FPS)
@@ -71,13 +86,14 @@ class TrackingStateConfig:
 @dataclass
 class VisualizerConfig:
     """Visualization window and overlay styling."""
-    window_name: str = "SIH Part 2 - Predictive Tracking & Recovery (Phase 4)"
+    window_name: str = "SIH Part 2 - Predictive Tracking & Virtual Camera"
     canvas_width: int = 1280
     canvas_height: int = 720
     fps: int = 30
     trail_length: int = 80                             # Number of historical points to display
     show_ground_truth: bool = True
     show_measurements: bool = True
+    show_camera_fov: bool = True                       # Display virtual camera FOV rectangle and crosshair
 
 
 @dataclass
@@ -85,6 +101,7 @@ class SystemConfig:
     """Global system configuration aggregating all component configurations."""
     beacon: BeaconSimConfig = field(default_factory=BeaconSimConfig)
     disturbance: DisturbanceConfig = field(default_factory=DisturbanceConfig)
+    camera: VirtualCameraConfig = field(default_factory=VirtualCameraConfig)
     kalman: KalmanConfig = field(default_factory=KalmanConfig)
     tracking: TrackingStateConfig = field(default_factory=TrackingStateConfig)
     visualizer: VisualizerConfig = field(default_factory=VisualizerConfig)

@@ -1,13 +1,16 @@
-"""Kalman-filter-based predictive tracker for moving optical beacons.
+"""Kalman-filter-based predictive tracker for moving optical beacons (Phase 4).
 
 This module provides:
 - 2D Linear Kalman Filter implementation using OpenCV (cv2.KalmanFilter).
 - Kinematic constant-velocity state model [x, y, vx, vy]^T.
-- Extrapolation / coasting during optical occlusion (prediction without measurement).
-- Seamless correction and state convergence upon measurement return / reacquisition.
-- Tracking state machine and confidence reporting for downstream controller integration.
+- Outlier detection and measurement gating (rejects far-away false positives).
+- Finite State Machine with exact states:
+    UNINITIALIZED -> TRACKING -> PREDICTING -> REACQUIRING -> LOST
+- Tracking confidence scoring and miss counter management.
+- Complete state telemetry for downstream controller integration.
 """
 
+import math
 from typing import Optional, Tuple, Union
 import cv2
 import numpy as np
@@ -17,7 +20,7 @@ from src.tracking_state import BeaconMeasurement, TrackingResult, TrackingState
 
 
 class KalmanBeaconTracker:
-    """Predictive Kalman Filter Tracker for moving optical beacon localization.
+    """Predictive Kalman Filter Tracker with outlier rejection and recovery state machine.
     
     State Vector (4x1):
         x = [x, y, vx, vy]^T
@@ -33,11 +36,11 @@ class KalmanBeaconTracker:
         kalman_cfg: Optional[KalmanConfig] = None,
         state_cfg: Optional[TrackingStateConfig] = None
     ) -> None:
-        """Initialize the OpenCV Kalman filter matrices and tracking state machine.
+        """Initialize OpenCV Kalman filter and tracking state machine.
         
         Args:
             kalman_cfg: Kalman filter tuning parameters.
-            state_cfg: Tracking state machine configuration parameters.
+            state_cfg: Tracking state machine and gating configuration.
         """
         self.kalman_cfg = kalman_cfg or KalmanConfig()
         self.state_cfg = state_cfg or TrackingStateConfig()
@@ -45,9 +48,10 @@ class KalmanBeaconTracker:
         self.state: TrackingState = TrackingState.UNINITIALIZED
         self.initialized: bool = False
         self.confidence: float = 0.0
-        self.frames_without_detection: int = 0
-        self.consecutive_detections: int = 0
+        self.miss_count: int = 0
+        self.consecutive_hits: int = 0
         self.last_measurement: Optional[Tuple[float, float]] = None
+        self.last_measurement_accepted: bool = False
         
         # Internal state buffer (4x1)
         self.current_state: np.ndarray = np.zeros((4, 1), dtype=np.float32)
@@ -61,10 +65,6 @@ class KalmanBeaconTracker:
         dt = float(self.kalman_cfg.dt)
         
         # 1. State Transition Matrix F (Constant Velocity Model)
-        # x_k = x_{k-1} + vx_{k-1} * dt
-        # y_k = y_{k-1} + vy_{k-1} * dt
-        # vx_k = vx_{k-1}
-        # vy_k = vy_{k-1}
         self.kf.transitionMatrix = np.array([
             [1.0, 0.0, dt, 0.0],
             [0.0, 1.0, 0.0, dt],
@@ -72,7 +72,7 @@ class KalmanBeaconTracker:
             [0.0, 0.0, 0.0, 1.0]
         ], dtype=np.float32)
 
-        # 2. Measurement Matrix H (we directly observe position x, y)
+        # 2. Measurement Matrix H (we observe position x, y)
         self.kf.measurementMatrix = np.array([
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0]
@@ -93,38 +93,35 @@ class KalmanBeaconTracker:
         self.kf.errorCovPost = np.diag([p_pos, p_pos, p_vel, p_vel]).astype(np.float32)
 
     def initialize(self, initial_position: Tuple[float, float], timestamp: float = 0.0) -> None:
-        """Initialize filter state at a confirmed starting position.
+        """Initialize filter state upon receiving the first valid measurement.
         
         Args:
             initial_position: Initial detected (x, y) coordinates.
-            timestamp: Measurement timestamp in seconds.
+            timestamp: Initial measurement timestamp.
         """
         init_x, init_y = float(initial_position[0]), float(initial_position[1])
         
-        # Set post-state: [x0, y0, 0, 0]^T
         self.kf.statePost = np.array([[init_x], [init_y], [0.0], [0.0]], dtype=np.float32)
         self.kf.statePre = self.kf.statePost.copy()
         
-        # Reset error covariance
         p_pos = float(self.kalman_cfg.initial_covariance_pos)
         p_vel = float(self.kalman_cfg.initial_covariance_vel)
         self.kf.errorCovPost = np.diag([p_pos, p_pos, p_vel, p_vel]).astype(np.float32)
         
         self.current_state = self.kf.statePost.copy()
         self.last_measurement = (init_x, init_y)
+        self.last_measurement_accepted = True
         self.initialized = True
-        self.state = TrackingState.TRACKING_LOCKED
+        self.state = TrackingState.TRACKING
         self.confidence = 1.0
-        self.frames_without_detection = 0
-        self.consecutive_detections = 1
+        self.miss_count = 0
+        self.consecutive_hits = 1
 
     def predict(self, dt: Optional[float] = None) -> np.ndarray:
-        """Perform the Kalman prediction step.
-        
-        Advances internal kinematic state by dt using the constant-velocity model.
+        """Perform the Kalman prediction step using the constant-velocity motion model.
         
         Args:
-            dt: Optional dynamic time step delta. If provided, updates transition matrix.
+            dt: Optional dynamic time step delta.
             
         Returns:
             np.ndarray: Predicted state vector [x, y, vx, vy]^T.
@@ -138,11 +135,11 @@ class KalmanBeaconTracker:
         return pred_state
 
     def update(self, measured_position: Tuple[float, float], timestamp: float = 0.0) -> np.ndarray:
-        """Perform Kalman measurement correction step when optical detection is available.
+        """Perform Kalman measurement correction when an accepted detection is available.
         
         Args:
-            measured_position: Detected (x, y) coordinates from Part 1.
-            timestamp: Current timestamp in seconds.
+            measured_position: Validated (x, y) coordinates.
+            timestamp: Current timestamp.
             
         Returns:
             np.ndarray: Corrected state vector [x, y, vx, vy]^T.
@@ -152,35 +149,63 @@ class KalmanBeaconTracker:
         
         self.current_state = corrected_state.copy()
         self.last_measurement = (float(measured_position[0]), float(measured_position[1]))
-        self.frames_without_detection = 0
-        self.consecutive_detections += 1
-        self.confidence = 1.0
-        self.state = TrackingState.TRACKING_LOCKED
         return corrected_state
+
+    def is_measurement_plausible(
+        self,
+        predicted_pos: Tuple[float, float],
+        measured_pos: Tuple[float, float]
+    ) -> Tuple[bool, float]:
+        """Perform measurement gating / outlier check against prediction.
+        
+        Computes Euclidean distance between predicted and measured position.
+        
+        Args:
+            predicted_pos: Predicted (x, y) coordinates from Kalman filter.
+            measured_pos: Incoming measured (x, y) coordinates.
+            
+        Returns:
+            Tuple of (is_valid boolean, euclidean distance in pixels).
+        """
+        dx = measured_pos[0] - predicted_pos[0]
+        dy = measured_pos[1] - predicted_pos[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+        is_valid = dist <= self.state_cfg.gating_threshold_px
+        return is_valid, dist
 
     def process_frame(
         self,
         measurement: Union[BeaconMeasurement, Optional[Tuple[float, float]]],
         timestamp: float = 0.0
     ) -> TrackingResult:
-        """Main per-frame processing cycle.
+        """Main per-frame state machine processing and predictive tracking loop.
         
-        Algorithm:
-        1. Always perform Kalman state prediction (predict step).
-        2. If optical measurement is valid:
-           - Correct Kalman filter using measurement (update step).
-           - Set state to TRACKING_LOCKED, reset loss counter.
-        3. If optical measurement is missing (loss/occlusion):
+        Flow:
+        1. Handle UNINITIALIZED state.
+        2. STEP 1: Always call kalman.predict().
+        3. STEP 2: If measurement exists, perform gating check against predicted state.
+           - If plausible (distance <= threshold):
+               - If recovering from miss/loss -> state = REACQUIRING
+               - Else -> state = TRACKING
+               - Correct Kalman filter using measurement.
+               - Reset miss_count = 0, boost confidence.
+           - If outlier (distance > threshold):
+               - Reject measurement (DO NOT call correct).
+               - Treat as miss: increment miss_count, degrade confidence.
+               - If miss_count > max_prediction_frames -> state = LOST
+               - Else -> state = PREDICTING
+        4. If measurement does not exist (loss / occlusion):
            - DO NOT call correct().
-           - Use predicted state directly as track estimate.
-           - Increment loss counter, degrade confidence, transition state machine.
+           - Increment miss_count, degrade confidence.
+           - If miss_count > max_prediction_frames -> state = LOST
+           - Else -> state = PREDICTING
         
         Args:
             measurement: BeaconMeasurement object OR raw (x, y) tuple / None.
             timestamp: Frame timestamp in seconds.
             
         Returns:
-            TrackingResult containing estimated position, velocity, and tracking status.
+            TrackingResult with complete state, telemetry, and health metrics.
         """
         # Parse measurement input
         has_detection = False
@@ -193,12 +218,13 @@ class KalmanBeaconTracker:
             has_detection = True
             meas_pos = (float(measurement[0]), float(measurement[1]))
 
-        # Handle uninitialized tracker
+        # 1. Handle uninitialized tracker
         if not self.initialized:
             if has_detection and meas_pos is not None:
                 self.initialize(meas_pos, timestamp)
                 return self.get_current_result(timestamp, is_predicted=False)
             else:
+                self.state = TrackingState.UNINITIALIZED
                 return TrackingResult(
                     timestamp=timestamp,
                     position=(0.0, 0.0),
@@ -206,37 +232,84 @@ class KalmanBeaconTracker:
                     state=TrackingState.UNINITIALIZED,
                     confidence=0.0,
                     is_predicted=False,
+                    miss_count=0,
+                    measurement_accepted=False,
                     covariance=self.kf.errorCovPost.copy(),
                     frames_without_detection=0
                 )
 
-        # STEP 1: Always predict next state ahead using kinematic motion model
+        # 2. STEP 1: Always predict next state ahead using kinematic motion model
         self.predict()
+        pred_pos = self.get_current_position()
 
-        # STEP 2: Branch based on measurement availability
+        # 3. STEP 2: Evaluate incoming measurement
         if has_detection and meas_pos is not None:
-            # Measurement available -> Correct Kalman filter
-            self.update(meas_pos, timestamp)
-            is_predicted = False
-        else:
-            # Measurement missing -> Coast on prediction only (DO NOT call correct)
-            self.frames_without_detection += 1
-            self.consecutive_detections = 0
-            is_predicted = True
+            # Gating / outlier check
+            plausible, dist = self.is_measurement_plausible(pred_pos, meas_pos)
             
-            # Confidence decay during missing detection
-            decay = self.frames_without_detection * self.state_cfg.confidence_decay_rate
-            self.confidence = max(0.0, 1.0 - decay)
+            if plausible:
+                # Plausible measurement -> Accepted!
+                self.last_measurement_accepted = True
+                is_recovering = (self.miss_count > 0) or (self.state in (TrackingState.PREDICTING, TrackingState.LOST))
+                
+                # Correct Kalman filter
+                self.update(meas_pos, timestamp)
+                self.miss_count = 0
+                self.consecutive_hits += 1
+                
+                # Confidence boost
+                self.confidence = min(
+                    self.state_cfg.max_confidence,
+                    self.confidence + self.state_cfg.confidence_recovery_rate
+                )
 
-            # State Machine Transitions
-            if self.frames_without_detection >= self.state_cfg.max_frames_lost_before_lost:
-                self.state = TrackingState.LOST
-            elif self.frames_without_detection >= self.state_cfg.max_frames_lost_before_search:
-                self.state = TrackingState.SEARCH_ACQUISITION
+                # State Transition: REACQUIRING if just recovered, otherwise TRACKING
+                if is_recovering:
+                    self.state = TrackingState.REACQUIRING
+                else:
+                    self.state = TrackingState.TRACKING
+
+                return self.get_current_result(timestamp, is_predicted=False)
+
             else:
-                self.state = TrackingState.PREDICTING_COASTING
+                # Outlier measurement -> REJECTED!
+                self.last_measurement_accepted = False
+                self.miss_count += 1
+                self.consecutive_hits = 0
+                
+                # Degrade confidence
+                self.confidence = max(
+                    self.state_cfg.min_confidence,
+                    self.confidence - self.state_cfg.confidence_decay_rate
+                )
 
-        return self.get_current_result(timestamp, is_predicted=is_predicted)
+                # State transition based on miss count limit
+                if self.miss_count > self.state_cfg.max_prediction_frames:
+                    self.state = TrackingState.LOST
+                else:
+                    self.state = TrackingState.PREDICTING
+
+                return self.get_current_result(timestamp, is_predicted=True)
+
+        else:
+            # Detection missing (occlusion / dropout)
+            self.last_measurement_accepted = False
+            self.miss_count += 1
+            self.consecutive_hits = 0
+            
+            # Degrade confidence
+            self.confidence = max(
+                self.state_cfg.min_confidence,
+                self.confidence - self.state_cfg.confidence_decay_rate
+            )
+
+            # State transition based on miss count limit
+            if self.miss_count > self.state_cfg.max_prediction_frames:
+                self.state = TrackingState.LOST
+            else:
+                self.state = TrackingState.PREDICTING
+
+            return self.get_current_result(timestamp, is_predicted=True)
 
     def get_current_position(self) -> Tuple[float, float]:
         """Retrieve current estimated (x, y) beacon position.
@@ -255,7 +328,7 @@ class KalmanBeaconTracker:
         return (float(self.current_state[2, 0]), float(self.current_state[3, 0]))
 
     def get_current_result(self, timestamp: float, is_predicted: bool = False) -> TrackingResult:
-        """Construct a clean TrackingResult snapshot for controller / visualizer consumption.
+        """Construct a complete TrackingResult snapshot.
         
         Args:
             timestamp: Current timestamp in seconds.
@@ -275,8 +348,10 @@ class KalmanBeaconTracker:
             state=self.state,
             confidence=self.confidence,
             is_predicted=is_predicted,
+            miss_count=self.miss_count,
+            measurement_accepted=self.last_measurement_accepted,
             covariance=cov,
-            frames_without_detection=self.frames_without_detection
+            frames_without_detection=self.miss_count
         )
 
     def reset(self) -> None:
@@ -284,8 +359,9 @@ class KalmanBeaconTracker:
         self.state = TrackingState.UNINITIALIZED
         self.initialized = False
         self.confidence = 0.0
-        self.frames_without_detection = 0
-        self.consecutive_detections = 0
+        self.miss_count = 0
+        self.consecutive_hits = 0
         self.last_measurement = None
+        self.last_measurement_accepted = False
         self.current_state = np.zeros((4, 1), dtype=np.float32)
         self._setup_kalman_matrices()

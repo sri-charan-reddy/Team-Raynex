@@ -1,13 +1,21 @@
-"""Main entry point and standalone demonstration script for Part 2 (Phase 3).
+"""Main entry point and standalone demonstration script for Part 2 (Phase 4).
 
 This script coordinates:
 1. Beacon ground-truth motion simulation (BeaconSimulator).
-2. Optical disturbance, measurement noise, and occlusion generation (DisturbanceSimulator).
-3. Kalman-filter-based predictive tracking and state estimation (KalmanBeaconTracker).
+2. Optical disturbance, measurement noise, occlusions, and outlier injection (DisturbanceSimulator).
+3. Kalman-filter-based predictive tracking with outlier rejection and recovery state machine (KalmanBeaconTracker).
 4. Real-time OpenCV visualization displaying:
-   - GREEN: Ground Truth
-   - YELLOW: Optical Measurements
+   - GREEN: Ground Truth (GT)
+   - YELLOW: Optical Measurements (MEAS)
+   - RED MARKER: Rejected Outlier Measurements
    - BLUE: Kalman Predicted / Corrected Track
+   - Comprehensive HUD telemetry (State, Confidence, Miss Count, Acceptance status).
+
+Demonstration Scenarios Covered:
+- Scenario A: Normal tracking (TRACKING)
+- Scenario B: Short detection loss (PREDICTING -> REACQUIRING -> TRACKING)
+- Scenario C: Long detection loss (PREDICTING -> LOST -> REACQUIRING -> TRACKING)
+- Scenario D: False/far detection rejection (OUTLIER REJECTED, Kalman track remains stable)
 
 Usage:
     python main.py
@@ -25,24 +33,26 @@ from src.visualizer import TrackingVisualizer
 
 
 def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
-    """Run the live Kalman predictive tracking demonstration loop.
+    """Run the live robust predictive tracking demonstration loop.
     
     Args:
         config: System configuration settings.
     """
-    print("=" * 72)
-    print("SIH Part 2: Kalman Predictive Tracking & Disturbance Handling (Phase 3)")
-    print("=" * 72)
-    print("Color Legend:")
-    print("  [GREEN]  - Ground Truth trajectory (GT)")
-    print("  [YELLOW] - Noisy optical measurements (MEAS) - disappears during occlusion")
-    print("  [BLUE]   - Kalman filter track (predicts continuously through occlusions)")
-    print("-" * 72)
-    print("Controls:")
+    print("=" * 76)
+    print("SIH Part 2: Robust Predictive Tracking & Outlier Rejection (Phase 4)")
+    print("=" * 76)
+    print("Scenarios Scheduled:")
+    print("  - Frames   0.. 59: Normal tracking [TRACKING]")
+    print("  - Frames  60.. 85: Short occlusion [PREDICTING -> REACQUIRING -> TRACKING]")
+    print("  - Frames 150..210: Long occlusion [PREDICTING -> LOST -> REACQUIRING -> TRACKING]")
+    print("  - Frames 270..271: Far outlier injection at (1100, 100) [OUTLIER REJECTED]")
+    print("-" * 76)
+    print("Interactive Controls:")
     print("  [SPACE]  - Pause / Resume simulation")
+    print("  [F]      - Inject a manual far-away outlier at (1100, 100)")
     print("  [R]      - Reset simulation and tracker to initial state")
     print("  [Q/ESC]  - Quit demonstration")
-    print("=" * 72)
+    print("=" * 76)
     
     beacon_sim = BeaconSimulator(config.beacon)
     disturbance_sim = DisturbanceSimulator(config.disturbance)
@@ -70,15 +80,15 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 # 1. Ground truth beacon motion simulation
                 ground_truth_pos = beacon_sim.step(dt)
                 
-                # 2. Optical disturbance, measurement noise, and occlusion simulation
+                # 2. Disturbance simulation (noise, scheduled occlusions, scheduled/manual outliers)
                 measurement = disturbance_sim.apply_disturbances(ground_truth_pos, timestamp, frame_idx)
                 
-                # 3. Kalman Filter Predictive Tracking
-                # Note: Tracker ONLY receives the optical measurement (or None when occluded).
-                # Tracker has NO access to ground truth.
+                # 3. Kalman Filter with Outlier Rejection & Recovery State Machine
+                # The tracker ONLY receives the optical measurement.
+                # Ground truth is never accessed by the tracker.
                 tracking_result = tracker.process_frame(measurement, timestamp)
                 
-                # 4. Render visualization combining GT, Measurement, and Kalman Track
+                # 4. Render visual frame
                 canvas = visualizer.render_frame(
                     ground_truth=ground_truth_pos,
                     measurement=measurement,
@@ -90,12 +100,15 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 cv2.imshow(window_name, canvas)
                 frame_idx += 1
             else:
-                # If paused, wait for key input
+                # Paused loop
                 key = cv2.waitKey(30) & 0xFF
                 if key in (ord('q'), ord('Q'), 27):
                     break
                 elif key == ord(' '):
                     paused = False
+                elif key in (ord('f'), ord('F')):
+                    disturbance_sim.trigger_manual_outlier((1100.0, 100.0))
+                    print(f"[Frame {frame_idx}] Manual outlier queued at (1100.0, 100.0)")
                 elif key in (ord('r'), ord('R')):
                     beacon_sim.reset()
                     disturbance_sim.reset()
@@ -105,14 +118,14 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                     paused = False
                 continue
             
-            # Compute FPS telemetry
+            # Telemetry FPS calculation
             curr_time = time.time()
             elapsed = curr_time - prev_time
             if elapsed > 0:
                 actual_fps = 0.9 * actual_fps + 0.1 * (1.0 / elapsed)
             prev_time = curr_time
             
-            # Frame rate timing control
+            # Frame timing
             compute_time = curr_time - loop_start
             wait_ms = max(1, int((dt - compute_time) * 1000))
             
@@ -122,6 +135,9 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 break
             elif key == ord(' '):
                 paused = True
+            elif key in (ord('f'), ord('F')):
+                disturbance_sim.trigger_manual_outlier((1100.0, 100.0))
+                print(f"[Frame {frame_idx}] Manual outlier queued at (1100.0, 100.0)")
             elif key in (ord('r'), ord('R')):
                 beacon_sim.reset()
                 disturbance_sim.reset()

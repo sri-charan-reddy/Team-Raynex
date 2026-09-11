@@ -2,9 +2,9 @@
 
 This module defines all tunable parameters for:
 - Beacon Motion Simulation (initial coordinates, velocity, boundary margins, random seed)
-- Disturbance & Occlusion Simulation (noise std, jitter std, occlusion intervals, random seed)
-- Tracking State Machine (confidence thresholds, loss timeouts)
-- Kalman Filter (process & measurement noise, covariance matrices - for Phase 3)
+- Disturbance & Occlusion Simulation (noise std, jitter std, occlusion intervals, outliers)
+- Tracking State Machine & Gating (gating threshold, max prediction frames, confidence dynamics)
+- Kalman Filter (process & measurement noise, covariance matrices)
 - Visualizer & Demonstration settings (window size, frame rates, color schemes)
 """
 
@@ -33,16 +33,22 @@ class DisturbanceConfig:
     enable_jitter: bool = True
     jitter_std: float = 1.0                            # High-frequency camera jitter noise (pixels)
     enable_occlusions: bool = True
+    # Demonstrates Scenario B (short loss: 60..85) and Scenario C (long loss: 150..210)
     occlusion_intervals: List[Tuple[int, int]] = field(
-        default_factory=lambda: [(60, 110), (180, 230), (300, 350)]
-    )                                                  # Frame ranges [start_frame, end_frame] where detection is lost
+        default_factory=lambda: [(60, 85), (150, 210)]
+    )
+    # Demonstrates Scenario D (far-away false detection spikes / outliers)
+    enable_outliers: bool = True
+    outlier_events: List[Tuple[int, Tuple[float, float]]] = field(
+        default_factory=lambda: [(270, (1100.0, 100.0)), (271, (1100.0, 100.0))]
+    )
     default_confidence: float = 0.95                   # Confidence assigned to valid detections
     random_seed: Optional[int] = 101                   # seed for reproducible disturbance / noise generation
 
 
 @dataclass
 class KalmanConfig:
-    """Kalman filter tuning parameters (for Phase 3)."""
+    """Kalman filter tuning parameters."""
     dt: float = 1.0 / 30.0                             # Nominal time step (30 FPS)
     process_noise_std_pos: float = 0.5                 # Standard deviation of position process noise
     process_noise_std_vel: float = 1.0                 # Standard deviation of velocity process noise
@@ -53,18 +59,19 @@ class KalmanConfig:
 
 @dataclass
 class TrackingStateConfig:
-    """State machine confidence thresholds and timeouts (for Phase 3)."""
-    min_confidence_to_lock: float = 0.7
-    max_frames_lost_before_search: int = 15
-    max_frames_lost_before_lost: int = 60
-    reacquisition_frames_required: int = 3
-    confidence_decay_rate: float = 0.05
+    """State machine, confidence dynamics, and outlier rejection gating parameters."""
+    gating_threshold_px: float = 85.0                  # Max distance between prediction and measurement to accept (pixels)
+    max_prediction_frames: int = 35                    # Max consecutive frames in PREDICTING before transitioning to LOST
+    confidence_decay_rate: float = 0.025               # Per-frame confidence decay during missing/rejected detections
+    confidence_recovery_rate: float = 0.15             # Confidence recovery boost per accepted valid measurement
+    min_confidence: float = 0.05                       # Minimum floor for tracking confidence
+    max_confidence: float = 1.0                        # Maximum ceiling for tracking confidence
 
 
 @dataclass
 class VisualizerConfig:
     """Visualization window and overlay styling."""
-    window_name: str = "SIH Part 2 - Kalman Predictive Tracking (Phase 3)"
+    window_name: str = "SIH Part 2 - Predictive Tracking & Recovery (Phase 4)"
     canvas_width: int = 1280
     canvas_height: int = 720
     fps: int = 30

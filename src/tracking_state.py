@@ -1,7 +1,8 @@
 """Tracking state definitions and data structures for Part 2.
 
 This module defines:
-- TrackingState: Finite State Machine (FSM) states for beacon tracking
+- TrackingState: Finite State Machine (FSM) states:
+    UNINITIALIZED, TRACKING, PREDICTING, REACQUIRING, LOST
 - BeaconMeasurement: Standard input container representing optical detection data from Part 1
 - TrackingResult: Standard output container provided to downstream controllers (Part 4)
 """
@@ -14,11 +15,11 @@ import numpy as np
 
 class TrackingState(Enum):
     """Operational states of the predictive tracking finite state machine."""
-    UNINITIALIZED = auto()       # No detections received yet; awaiting initial lock
-    TRACKING_LOCKED = auto()     # Receiving regular valid detections; high confidence
-    PREDICTING_COASTING = auto() # Missing optical detection; estimating position using Kalman motion model
-    SEARCH_ACQUISITION = auto()  # Prolonged loss; expanding search uncertainty area for reacquisition
-    LOST = auto()                # Search timeout exceeded; tracking lost, requires re-initialization
+    UNINITIALIZED = auto()  # No valid initial detection; awaiting initial lock
+    TRACKING = auto()       # Valid measurement received; Kalman predict + correct
+    PREDICTING = auto()     # Measurement missing or rejected; Kalman predict only (dead reckoning)
+    REACQUIRING = auto()    # Measurement returned after missed frames; passed gating check
+    LOST = auto()           # Detection lost longer than max_prediction_frames limit
 
 
 @dataclass
@@ -48,10 +49,12 @@ class TrackingResult:
         position: Estimated / predicted 2D position (x, y).
         velocity: Estimated velocity vector (vx, vy) in pixels/second.
         state: Current TrackingState of the system.
-        confidence: Normalized tracking confidence score in [0.0, 1.0].
-        is_predicted: True if this result is purely predicted without a fresh measurement.
-        covariance: 2x2 or 4x4 covariance matrix representing state uncertainty.
-        frames_without_detection: Number of consecutive frames without measurement.
+        confidence: Normalized tracking health / confidence score in [0.0, 1.0].
+        is_predicted: True if this result is purely dead-reckoned without measurement update.
+        miss_count: Number of consecutive frames without an accepted measurement.
+        measurement_accepted: True if the current frame measurement passed gating and corrected the filter.
+        covariance: 4x4 or 2x2 error covariance matrix representing state uncertainty.
+        frames_without_detection: Deprecated alias for miss_count.
     """
     timestamp: float
     position: Tuple[float, float]
@@ -59,5 +62,7 @@ class TrackingResult:
     state: TrackingState
     confidence: float
     is_predicted: bool
+    miss_count: int = 0
+    measurement_accepted: bool = False
     covariance: Optional[np.ndarray] = None
     frames_without_detection: int = 0

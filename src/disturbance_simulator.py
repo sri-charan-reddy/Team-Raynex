@@ -27,7 +27,8 @@ class DisturbanceSimulator:
         self.config = config or DisturbanceConfig()
         self.rng = np.random.RandomState(self.config.random_seed)
         self.current_frame: int = 0
-        self.manual_outlier_queue: List[Tuple[float, float]] = []
+        self.manual_outlier_remaining_frames: int = 0
+        self.manual_outlier_pos: Tuple[float, float] = (1100.0, 100.0)
 
     def is_occluded(self, frame_idx: int) -> bool:
         """Check if the beacon detection is currently lost/occluded for the given frame index.
@@ -46,17 +47,18 @@ class DisturbanceSimulator:
         return False
 
     def get_configured_outlier(self, frame_idx: int) -> Optional[Tuple[float, float]]:
-        """Check if a false-positive outlier measurement is scheduled for this frame.
+        """Check if a false-positive outlier measurement is active for this frame.
         
         Args:
             frame_idx: Current frame index.
             
         Returns:
-            False outlier coordinates (x, y) if scheduled, else None.
+            False outlier coordinates (x, y) if active, else None.
         """
-        # 1. Check manual queued outlier
-        if self.manual_outlier_queue:
-            return self.manual_outlier_queue.pop(0)
+        # 1. Check persistent manual outlier (active for duration_frames)
+        if self.manual_outlier_remaining_frames > 0:
+            self.manual_outlier_remaining_frames -= 1
+            return self.manual_outlier_pos
 
         # 2. Check scheduled config outliers
         if not self.config.enable_outliers:
@@ -66,13 +68,19 @@ class DisturbanceSimulator:
                 return out_pos
         return None
 
-    def trigger_manual_outlier(self, outlier_pos: Tuple[float, float] = (1100.0, 100.0)) -> None:
-        """Queue a manual false-detection outlier for the upcoming frame.
+    def trigger_manual_outlier(
+        self,
+        outlier_pos: Tuple[float, float] = (1100.0, 100.0),
+        duration_frames: int = 60
+    ) -> None:
+        """Trigger a manual false-detection outlier that persists for duration_frames.
         
         Args:
-            outlier_pos: False (x, y) coordinate to inject.
+            outlier_pos: Deliberately wrong/far (x, y) coordinate to inject.
+            duration_frames: Number of consecutive frames to keep outlier active (default 60).
         """
-        self.manual_outlier_queue.append(outlier_pos)
+        self.manual_outlier_pos = outlier_pos
+        self.manual_outlier_remaining_frames = duration_frames
 
     def add_measurement_noise(self, true_pos: Tuple[float, float]) -> Tuple[float, float]:
         """Add Gaussian sensor noise and camera jitter to the ground-truth position.
@@ -119,7 +127,7 @@ class DisturbanceSimulator:
         """
         self.current_frame = frame_idx
 
-        # 1. Check for scheduled / manual outlier detection spike
+        # 1. Check for active manual or scheduled outlier detection spike
         outlier = self.get_configured_outlier(frame_idx)
         if outlier is not None:
             return BeaconMeasurement(
@@ -154,4 +162,4 @@ class DisturbanceSimulator:
         """Reset the disturbance simulator and its internal RNG."""
         self.rng = np.random.RandomState(self.config.random_seed)
         self.current_frame = 0
-        self.manual_outlier_queue.clear()
+        self.manual_outlier_remaining_frames = 0

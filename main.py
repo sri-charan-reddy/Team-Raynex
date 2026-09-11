@@ -49,7 +49,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
     print("-" * 76)
     print("Interactive Controls:")
     print("  [SPACE]  - Pause / Resume simulation")
-    print("  [F]      - Inject a manual far-away outlier at (1100, 100)")
+    print("  [F]      - Inject a 60-frame (~2 sec) false outlier at (1100, 100)")
     print("  [R]      - Reset simulation and tracker to initial state")
     print("  [Q/ESC]  - Quit demonstration")
     print("=" * 76)
@@ -107,8 +107,8 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 elif key == ord(' '):
                     paused = False
                 elif key in (ord('f'), ord('F')):
-                    disturbance_sim.trigger_manual_outlier((1100.0, 100.0))
-                    print(f"[Frame {frame_idx}] Manual outlier queued at (1100.0, 100.0)")
+                    disturbance_sim.trigger_manual_outlier((1100.0, 100.0), duration_frames=60)
+                    print(f"[Frame {frame_idx}] Manual outlier triggered at (1100.0, 100.0) for 60 frames (~2 sec).")
                 elif key in (ord('r'), ord('R')):
                     beacon_sim.reset()
                     disturbance_sim.reset()
@@ -136,8 +136,8 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
             elif key == ord(' '):
                 paused = True
             elif key in (ord('f'), ord('F')):
-                disturbance_sim.trigger_manual_outlier((1100.0, 100.0))
-                print(f"[Frame {frame_idx}] Manual outlier queued at (1100.0, 100.0)")
+                disturbance_sim.trigger_manual_outlier((1100.0, 100.0), duration_frames=60)
+                print(f"[Frame {frame_idx}] Manual outlier triggered at (1100.0, 100.0) for 60 frames (~2 sec).")
             elif key in (ord('r'), ord('R')):
                 beacon_sim.reset()
                 disturbance_sim.reset()

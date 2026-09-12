@@ -1,22 +1,22 @@
 {
-  "timestamp": "2026-09-12T05:18:50.013359+00:00",
+  "timestamp": "2026-09-12T05:29:15.167987+00:00",
   "benchmark_name": "SIH Part 2 - Predictive Tracking & Disturbance Handling",
   "validation_verdict": "PASS",
   "simulation": {
     "total_frames": 400,
     "virtual_duration_s": 13.333333333333334,
-    "wall_clock_duration_s": 0.016413500008638948,
+    "wall_clock_duration_s": 0.0165465000027325,
     "target_fps": 30.0,
-    "actual_fps": 24370.183068173592
+    "actual_fps": 24174.296675063833
   },
   "processing_time_ms": {
-    "mean": 0.034964748920174316,
-    "max": 0.16999998479150236,
-    "min": 0.010299991117790341,
-    "median": 0.03969998215325177,
-    "p95": 0.05073998036095869,
-    "p99": 0.12699297716608263,
-    "std": 0.019724800746373124
+    "mean": 0.0354722509655403,
+    "max": 0.22079999325796962,
+    "min": 0.010499992640689015,
+    "median": 0.039799982914701104,
+    "p95": 0.04943999811075624,
+    "p99": 0.12592199753271405,
+    "std": 0.020798594041968144
   },
   "tracking_accuracy_px": {
     "mean_overall": 9.107117865899342,

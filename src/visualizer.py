@@ -303,7 +303,7 @@ class TrackingVisualizer:
             det_text = "Detection: YES (Optical Signal Received)"
             det_color = (50, 220, 50)
         else:
-            det_text = "Detection: NO (Optical Occlusion Active)"
+            det_text = "Detection: NO (Out of FOV / Occluded)"
             det_color = (50, 50, 235)
 
         cv2.putText(canvas, det_text, (26, line_y),

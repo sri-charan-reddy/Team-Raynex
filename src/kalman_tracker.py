@@ -170,7 +170,13 @@ class KalmanBeaconTracker:
         dx = measured_pos[0] - predicted_pos[0]
         dy = measured_pos[1] - predicted_pos[1]
         dist = math.sqrt(dx * dx + dy * dy)
-        is_valid = dist <= self.state_cfg.gating_threshold_px
+        
+        # In SEARCHING state, gating threshold expands by search radius to allow acquisition across the bounded search area
+        gate = self.state_cfg.gating_threshold_px
+        if self.state == TrackingState.SEARCHING:
+            gate += 140.0  # search_radius_px
+            
+        is_valid = dist <= gate
         return is_valid, dist
 
     def process_frame(
@@ -183,16 +189,18 @@ class KalmanBeaconTracker:
         Flow:
         1. Handle UNINITIALIZED state.
         2. STEP 1: Always call kalman.predict().
-        3. STEP 2: If measurement exists, perform gating check against predicted state.
-           - If plausible (distance <= threshold):
-               - If recovering from miss/search/loss -> state = REACQUIRING
-               - Else -> state = TRACKING
-               - Correct Kalman filter using measurement.
-               - Reset miss_count = 0, boost confidence.
-           - If outlier (distance > threshold):
-               - Reject measurement (DO NOT call correct).
-               - Treat as miss: increment miss_count, degrade confidence.
-               - Evaluate state transition: PREDICTING -> SEARCHING -> LOST.
+        3. STEP 2: If measurement exists:
+           - If in LOST state: allow controlled reacquisition (re-initialize at measurement, REACQUIRING -> TRACKING).
+           - If in TRACKING/PREDICTING/SEARCHING: perform gating check.
+             - If plausible (distance <= threshold):
+                 - If recovering from miss/search/loss -> state = REACQUIRING
+                 - Else -> state = TRACKING
+                 - Correct Kalman filter using measurement.
+                 - Reset miss_count = 0, boost confidence.
+             - If outlier (distance > threshold):
+                 - Reject measurement (DO NOT call correct).
+                 - Treat as miss: increment miss_count, degrade confidence.
+                 - Evaluate state transition: PREDICTING -> SEARCHING -> LOST.
         4. If measurement does not exist (loss / occlusion):
            - DO NOT call correct().
            - Increment miss_count, degrade confidence.
@@ -242,13 +250,34 @@ class KalmanBeaconTracker:
 
         # 3. STEP 2: Evaluate incoming measurement
         if has_detection and meas_pos is not None:
-            # Gating / outlier check
+            # Special handling for LOST state: dead-reckoned prediction is stale.
+            # Allow controlled reacquisition: optical detection with valid confidence (>= 0.4)
+            # cleanly re-anchors the filter without being rejected by the stale prediction.
+            if self.state == TrackingState.LOST:
+                opt_conf = measurement.confidence if isinstance(measurement, BeaconMeasurement) else 1.0
+                if opt_conf >= 0.4:
+                    self.last_measurement_accepted = True
+                    self.initialize(meas_pos, timestamp)
+                    self.state = TrackingState.REACQUIRING
+                    self.confidence = 0.60
+                    self.miss_count = 0
+                    self.consecutive_hits = 1
+                    return self.get_current_result(timestamp, is_predicted=False)
+                else:
+                    # Low confidence detection in LOST -> Reject as outlier/noise
+                    self.last_measurement_accepted = False
+                    self.miss_count += 1
+                    self.consecutive_hits = 0
+                    self.state = TrackingState.LOST
+                    return self.get_current_result(timestamp, is_predicted=True)
+
+            # Gating / outlier check for active tracking states
             plausible, dist = self.is_measurement_plausible(pred_pos, meas_pos)
             
             if plausible:
                 # Plausible measurement -> Accepted!
                 self.last_measurement_accepted = True
-                is_recovering = (self.miss_count > 0) or (self.state in (TrackingState.PREDICTING, TrackingState.SEARCHING, TrackingState.LOST))
+                is_recovering = (self.miss_count > 0) or (self.state in (TrackingState.PREDICTING, TrackingState.SEARCHING, TrackingState.REACQUIRING))
                 
                 # Correct Kalman filter
                 self.update(meas_pos, timestamp)
@@ -262,7 +291,7 @@ class KalmanBeaconTracker:
                 )
 
                 # State Transition: REACQUIRING if just recovered, otherwise TRACKING
-                if is_recovering:
+                if is_recovering and self.state != TrackingState.REACQUIRING:
                     self.state = TrackingState.REACQUIRING
                 else:
                     self.state = TrackingState.TRACKING

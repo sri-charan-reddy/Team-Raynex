@@ -20,10 +20,10 @@ class BeaconSimConfig:
     """Ground-truth beacon motion simulation parameters."""
     arena_width: int = 1280
     arena_height: int = 720
-    # Starts beacon offset from camera center (640, 360) to demonstrate pan/tilt acquisition
-    start_pos: Tuple[float, float] = (900.0, 450.0)
-    start_velocity: Tuple[float, float] = (3.5, -2.5)  # pixels per frame
-    speed_magnitude: float = 4.5                       # nominal speed in pixels per frame
+    # Starts beacon offset from camera center (640, 360) inside initial FOV to demonstrate pan/tilt acquisition
+    start_pos: Tuple[float, float] = (750.0, 360.0)
+    start_velocity: Tuple[float, float] = (2.5, 1.0)   # pixels per frame
+    speed_magnitude: float = 2.8                       # nominal speed in pixels per frame
     heading_noise_std: float = 0.04                    # slight steering / trajectory perturbation per frame (rad)
     margin: float = 50.0                               # boundary safety margin to trigger smooth bounce / turn
     random_seed: Optional[int] = 42                    # seed for reproducible ground truth motion
@@ -74,16 +74,16 @@ class DisturbanceConfig:
     jitter_std: float = 1.0                            # High-frequency camera jitter noise (pixels)
     turbulence: AtmosphericTurbulenceConfig = field(default_factory=AtmosphericTurbulenceConfig)
     enable_occlusions: bool = True
-    # Demonstrates Scenario B (short loss: 60..80), Scenario C (extended loss: 150..220 triggering local search)
+    # Demonstrates Scenario B (short loss: 60..80), Scenario C (extended loss: 150..195 triggering local search)
     occlusion_intervals: List[Tuple[int, int]] = field(
-        default_factory=lambda: [(60, 80), (150, 220)]
+        default_factory=lambda: [(60, 80), (150, 195)]
     )
     # Demonstrates Scenario D (far-away false detection spikes / outliers)
     enable_outliers: bool = True
     outlier_events: List[Tuple[int, Tuple[float, float]]] = field(
         default_factory=lambda: [(290, (1100.0, 100.0)), (291, (1100.0, 100.0))]
     )
-    require_fov_for_detection: bool = False            # When True, beacon must be within VirtualCamera FOV to be detected
+    require_fov_for_detection: bool = True             # When True, beacon must be within VirtualCamera FOV to be detected
     default_confidence: float = 0.95                   # Confidence assigned to valid detections
     random_seed: Optional[int] = 101                   # seed for reproducible disturbance / noise generation
 

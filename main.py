@@ -17,9 +17,9 @@ This script coordinates:
    - Comprehensive HUD telemetry (State, Confidence, Miss Count, Local Search & Pan/Tilt Status).
 
 Demonstration Scenarios Covered:
-- Scenario A: Initial Pan/Tilt Acquisition & Tracking (camera slews from center (640,360) to beacon (900,450))
+- Scenario A: Initial Pan/Tilt Acquisition & Tracking (camera slews from center (640,360) to beacon (750,360))
 - Scenario B: Short detection loss (PREDICTING -> Camera continues predictive pan/tilt servoing)
-- Scenario C: Extended detection loss (PREDICTING -> SEARCHING: Local search scans bounded region around Kalman prediction -> REACQUIRING / LOST)
+- Scenario C: Extended detection loss (PREDICTING -> SEARCHING: Local search scans bounded region around Kalman prediction -> REACQUIRING)
 - Scenario D: False/far detection rejection (OUTLIER REJECTED, Camera does not jump)
 
 Usage:
@@ -53,7 +53,7 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
     print("Scenarios Scheduled:")
     print("  - Frames   0.. 59: Pan/Tilt Slew & Acquisition [TRACKING_SERVO]")
     print("  - Frames  60.. 80: Short occlusion [PREDICTIVE_SERVO -> REACQUIRING]")
-    print("  - Frames 150..220: Extended occlusion [PREDICTING -> SEARCHING (Local Search) -> LOST/REACQ]")
+    print("  - Frames 150..195: Extended occlusion [PREDICTING -> SEARCHING (Local Search) -> REACQUIRING]")
     print("  - Frames 290..291: Far outlier at (1100, 100) [REJECTED, Camera Stable]")
     print("-" * 78)
     print("Interactive Controls:")
@@ -96,7 +96,8 @@ def run_demonstration(config: SystemConfig = DEFAULT_CONFIG) -> None:
                 ground_truth_pos = beacon_sim.step(dt)
                 
                 # 2. Disturbance simulation (atmospheric turbulence, noise, scheduled occlusions, outliers)
-                measurement = disturbance_sim.apply_disturbances(ground_truth_pos, timestamp, frame_idx)
+                # Virtual camera FOV determines whether beacon is visible to the optical detector
+                measurement = disturbance_sim.apply_disturbances(ground_truth_pos, timestamp, frame_idx, camera=camera)
                 
                 # 3. Kalman Filter with Outlier Rejection & State Machine (PREDICTING -> SEARCHING -> LOST)
                 # Tracker receives strictly optical detection data; ground truth is completely hidden.

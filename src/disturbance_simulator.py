@@ -14,6 +14,7 @@ import numpy as np
 from config import DisturbanceConfig
 from src.atmospheric_turbulence import AtmosphericTurbulence
 from src.tracking_state import BeaconMeasurement
+from src.virtual_camera import VirtualCamera
 
 
 class DisturbanceSimulator:
@@ -113,17 +114,20 @@ class DisturbanceSimulator:
         self,
         ground_truth_pos: Tuple[float, float],
         timestamp: float,
-        frame_idx: int
+        frame_idx: int,
+        camera: Optional[VirtualCamera] = None
     ) -> BeaconMeasurement:
         """Produce an optical BeaconMeasurement from ground-truth position.
         
-        Evaluates outliers, occlusions, atmospheric turbulence, and Gaussian measurement noise.
+        Evaluates outliers, occlusions, virtual camera FOV visibility,
+        atmospheric turbulence, and Gaussian measurement noise.
         Ground truth is passed by value and is never altered.
         
         Args:
             ground_truth_pos: True (x, y) beacon position.
             timestamp: Timestamp in seconds.
             frame_idx: Current simulation frame number.
+            camera: Optional VirtualCamera instance to enforce FOV visibility.
             
         Returns:
             BeaconMeasurement data structure.
@@ -151,13 +155,24 @@ class DisturbanceSimulator:
                 raw_bbox=None
             )
 
-        # 3. Step A: Optical observation undergoes atmospheric turbulence
+        # 3. Check Virtual Camera FOV visibility (beacon must be within camera FOV)
+        if getattr(self.config, "require_fov_for_detection", True) and camera is not None:
+            if not camera.is_in_fov(ground_truth_pos):
+                return BeaconMeasurement(
+                    timestamp=timestamp,
+                    position=None,
+                    detected=False,
+                    confidence=0.0,
+                    raw_bbox=None
+                )
+
+        # 4. Step A: Optical observation undergoes atmospheric turbulence
         turb_pos = self.turbulence.apply(ground_truth_pos)
 
-        # 4. Step B: Sensor noise & camera jitter
+        # 5. Step B: Sensor noise & camera jitter
         noisy_pos = self.add_measurement_noise(turb_pos)
 
-        # 5. Step C: Scintillation effect on detection confidence
+        # 6. Step C: Scintillation effect on detection confidence
         conf = float(np.clip(self.config.default_confidence * self.turbulence.scintillation_factor, 0.1, 1.0))
 
         return BeaconMeasurement(

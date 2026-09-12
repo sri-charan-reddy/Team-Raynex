@@ -194,8 +194,35 @@ def verify_local_search() -> bool:
     assert controller.mode == ControllerMode.HOLDING, f"Expected HOLDING, got {controller.mode}"
     print("  -> PASSED: Failed search cleanly transitions to LOST with camera safely holding.")
 
+    # -------------------------------------------------------------
+    # TEST 7: Reacquisition from LOST State
+    # -------------------------------------------------------------
+    print("\n[TEST 7] Reacquisition from LOST State Check:")
+    # Measurement returns at (620, 380) while tracker is currently in LOST
+    assert tracker.state == TrackingState.LOST
+    lost_reacq_m = BeaconMeasurement(timestamp=50 * dt, position=(620.0, 380.0), detected=True, confidence=0.9)
+    res_lost_reacq = tracker.process_frame(lost_reacq_m, 50 * dt)
+    search.update(res_lost_reacq.position, is_searching=(res_lost_reacq.state == TrackingState.SEARCHING))
+    controller.update(res_lost_reacq, dt)
+
+    print(f"  Returning measurement at (620, 380) -> State: {res_lost_reacq.state.name}, Accepted: {res_lost_reacq.measurement_accepted}")
+    print(f"  Kalman Position after recovery: {res_lost_reacq.position}, Miss Count: {tracker.miss_count}, Controller: {controller.mode.name}")
+    assert res_lost_reacq.state == TrackingState.REACQUIRING, f"Expected REACQUIRING, got {res_lost_reacq.state}"
+    assert res_lost_reacq.measurement_accepted is True, "Measurement was rejected in LOST state!"
+    assert tracker.miss_count == 0, f"Miss count not reset: {tracker.miss_count}"
+    assert abs(res_lost_reacq.position[0] - 620.0) < 1e-3 and abs(res_lost_reacq.position[1] - 380.0) < 1e-3, "Kalman state not re-anchored to measurement!"
+    assert controller.mode == ControllerMode.TRACKING_SERVO, f"Controller should be TRACKING_SERVO, got {controller.mode}"
+
+    # Next frame -> Confirmed TRACKING
+    next_m_lost = BeaconMeasurement(timestamp=51 * dt, position=(623.0, 378.0), detected=True, confidence=0.9)
+    res_track_after_lost = tracker.process_frame(next_m_lost, 51 * dt)
+    controller.update(res_track_after_lost, dt)
+    print(f"  Next frame state: {res_track_after_lost.state.name} | Confidence: {res_track_after_lost.confidence:.2f}")
+    assert res_track_after_lost.state == TrackingState.TRACKING
+    print("  -> PASSED: LOST state successfully reacquires returning beacon and resumes normal tracking.")
+
     print("\n" + "=" * 76)
-    print("ALL LOCAL SEARCH MODULE CHECKS PASSED SUCCESSFULLY!")
+    print("ALL LOCAL SEARCH & REACQUISITION CHECKS PASSED SUCCESSFULLY!")
     print("=" * 76)
     return True
 
